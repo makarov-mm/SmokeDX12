@@ -8,7 +8,7 @@ volumetric grid, and the result is displayed with a single pass volumetric ray
 marcher. No external dependencies, no third party libraries, no legacy DirectX
 SDK. Just the Windows SDK that ships with Visual Studio.
 
-![grid](https://img.shields.io/badge/grid-128%C2%B3-blue) ![api](https://img.shields.io/badge/api-Direct3D%2012-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![grid](https://img.shields.io/badge/grid-192x192x96-blue) ![api](https://img.shields.io/badge/api-Direct3D%2012-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## What it actually does
 
@@ -16,6 +16,14 @@ The solver integrates the incompressible Navier Stokes equations on a uniform
 Eulerian grid using the classic operator splitting scheme introduced by Jos Stam
 in *Stable Fluids*, extended with the buoyancy and vorticity confinement terms
 described by Fedkiw, Stam and Jensen in *Visual Simulation of Smoke*.
+
+The domain is deliberately not a cube. Cells are cubic, so the ratio between
+the grid axes is also the world aspect of the box: 192x192x96 gives a domain
+that is twice as tall and twice as long along the wind as it is deep, which is
+what lets the plume rise and bend downwind instead of flattening against a
+wall. Change the three `GridResolution` constants in `Application.cpp` and
+everything else (box intersection, floor position, emitter shape) follows
+automatically.
 
 Each simulation step is eight compute passes:
 
@@ -41,7 +49,10 @@ solver relaxes the velocity field towards a target wind field:
 u += (u_wind - u) * saturate(drag * dt)
 ```
 
-so the gas can never exceed the wind speed itself. The target field is modulated
+and only the horizontal velocity components take part, because dragging the
+vertical component would fight buoyancy and silently cap the rise height (this
+is exactly the bug an earlier version of this project had). The gas can never
+exceed the wind speed itself. The target field is modulated
 by gusts (low frequency noise over time and height), its direction slowly
 meanders, and the whole thing fades in with altitude so the base of the plume
 stays attached to the source while the column above it bends and tears
@@ -130,7 +141,8 @@ goes to the debug output and the previous pipelines keep running.
 
 The current value of every tunable parameter is shown in the window title, so
 dialling in a look and then copying the numbers back into the defaults in
-`FluidSolver.h` and `VolumeRenderer.h` is the intended workflow.
+`FluidSolver.h` and `VolumeRenderer.h` is the intended workflow. The grid
+resolution lives at the top of `Application.cpp`.
 
 ## Project layout
 

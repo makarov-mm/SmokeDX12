@@ -143,6 +143,7 @@ void VolumeRenderer::Render(
     GpuTexture3D& density,
     GpuTexture3D& temperature,
     const RenderSettings& settings,
+    const float boxSize[3],
     uint32_t width,
     uint32_t height,
     float time)
@@ -202,9 +203,9 @@ void VolumeRenderer::Render(
     constants.lightColor[2] = settings.lightColor[2];
     constants.stepCount = static_cast<float>(settings.stepCount);
 
-    constants.boxSize[0] = 1.0f;
-    constants.boxSize[1] = 1.0f;
-    constants.boxSize[2] = 1.0f;
+    constants.boxSize[0] = boxSize[0];
+    constants.boxSize[1] = boxSize[1];
+    constants.boxSize[2] = boxSize[2];
     constants.exposure = settings.exposure;
 
     constants.emissionScale = settings.emissionScale;

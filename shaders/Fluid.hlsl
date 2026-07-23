@@ -48,6 +48,14 @@ RWTexture3D<float> TargetScalarC : register(u3);
 
 #define GROUP_SIZE 8
 
+// The domain is not a cube. Cells are cubic, so the world aspect of the box is
+// the grid size normalised by its smallest axis.
+float3 BoxAspect()
+{
+    float smallest = min(min(GridSize.x, GridSize.y), GridSize.z);
+    return float3(GridSize) / smallest;
+}
+
 bool IsOutside(uint3 cell)
 {
     return cell.x >= GridSize.x || cell.y >= GridSize.y || cell.z >= GridSize.z;
@@ -177,11 +185,12 @@ void CSInject(uint3 id : SV_DispatchThreadID)
 
     // The source wanders slowly, which is enough to stop the plume from growing
     // as a perfectly symmetric mushroom.
+    float3 aspect = BoxAspect();
     float3 center = EmitterPosition;
-    center.x += (Noise(float3(Time * 0.37f, 0.0f, 0.0f)) - 0.5f) * EmitterRadius * 0.8f;
-    center.z += (Noise(float3(0.0f, 0.0f, Time * 0.31f + 17.0f)) - 0.5f) * EmitterRadius * 0.8f;
+    center.x += (Noise(float3(Time * 0.37f, 0.0f, 0.0f)) - 0.5f) * EmitterRadius * 0.8f / aspect.x;
+    center.z += (Noise(float3(0.0f, 0.0f, Time * 0.31f + 17.0f)) - 0.5f) * EmitterRadius * 0.8f / aspect.z;
 
-    float3 offset = uvw - center;
+    float3 offset = (uvw - center) * BoxAspect();
     float radialDistance = length(offset);
     float falloff = 1.0f - smoothstep(EmitterRadius * 0.25f, EmitterRadius, radialDistance);
 
@@ -247,7 +256,11 @@ void CSForces(uint3 id : SV_DispatchThreadID)
     float heightFade = smoothstep(0.08f, 0.45f, uvw.y);
 
     float3 windTarget = windDirection * WindStrength * gust * heightFade;
-    velocity += (windTarget - velocity) * saturate(WindDrag * Dt);
+
+    // Only the horizontal components relax towards the wind. Dragging the
+    // vertical component too would fight buoyancy and cap the rise height.
+    float relaxation = saturate(WindDrag * Dt);
+    velocity.xz += (windTarget.xz - velocity.xz) * relaxation;
 
     // Vorticity confinement puts back the small scale rotation that advection smears out.
     int3 cell = int3(id);

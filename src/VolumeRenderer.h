@@ -28,7 +28,7 @@ struct RenderSettings
     float skyBottomColor[3] = { 0.105f, 0.118f, 0.150f };
     float floorColor[3] = { 0.040f, 0.043f, 0.052f };
 
-    float floorHeight = -0.5f;
+    float floorHeight = -1.0f;
     float fogDensity = 0.035f;
     float anisotropy = 0.40f;
     float gridScale = 4.0f;
@@ -91,6 +91,7 @@ public:
         GpuTexture3D& density,
         GpuTexture3D& temperature,
         const RenderSettings& settings,
+        const float boxSize[3],
         uint32_t width,
         uint32_t height,
         float time);

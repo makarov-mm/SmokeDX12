@@ -12,9 +12,13 @@ namespace
     constexpr uint32_t InitialWidth = 1600;
     constexpr uint32_t InitialHeight = 900;
 
-    // Grid resolution of the simulation. 128 is a good default, 192 or 256 look
-    // better and are still interactive on a modern discrete card.
-    constexpr uint32_t GridResolution = 128;
+    // Grid resolution of the simulation. Cells are cubic, so the ratio between
+    // the axes is also the world aspect of the box: this domain is twice as
+    // tall and twice as long along the wind as it is deep, which gives the
+    // plume room to rise and bend before it meets a wall.
+    constexpr uint32_t GridResolutionX = 192;
+    constexpr uint32_t GridResolutionY = 192;
+    constexpr uint32_t GridResolutionZ = 96;
 
     // The solver runs at a fixed step, which keeps the simulation reproducible
     // and stops it from blowing up when the frame time spikes.
@@ -94,7 +98,7 @@ bool Application::Initialize()
         return false;
     }
 
-    if (!m_solver.Initialize(m_device.GetDevice(), &m_allocator, &m_shaders, GridResolution))
+    if (!m_solver.Initialize(m_device.GetDevice(), &m_allocator, &m_shaders, GridResolutionX, GridResolutionY, GridResolutionZ))
     {
         const std::string& error = m_shaders.GetLastError();
         std::wstring message(error.begin(), error.end());
@@ -110,7 +114,7 @@ bool Application::Initialize()
         return false;
     }
 
-    m_camera.SetTarget(DirectX::XMFLOAT3(0.0f, 0.02f, 0.0f));
+    m_camera.SetTarget(DirectX::XMFLOAT3(0.0f, -0.10f, 0.0f));
     return true;
 }
 
@@ -270,12 +274,15 @@ void Application::Render(float deltaTime)
     const float clearColor[4] = { 0.02f, 0.024f, 0.033f, 1.0f };
     commandList->ClearRenderTargetView(renderTargetView, clearColor, 0, nullptr);
 
+    const float boxSize[3] = { m_solver.GetBoxSizeX(), m_solver.GetBoxSizeY(), m_solver.GetBoxSizeZ() };
+
     m_renderer.Render(
         commandList,
         m_camera,
         m_solver.GetDensity(),
         m_solver.GetTemperature(),
         m_renderSettings,
+        boxSize,
         m_device.GetWidth(),
         m_device.GetHeight(),
         m_time);
@@ -298,8 +305,10 @@ void Application::UpdateTitle(float deltaTime)
     const float fps = m_smoothedFrameTime > 0.0f ? 1.0f / m_smoothedFrameTime : 0.0f;
 
     const std::wstring title = std::format(
-        L"SmokeDX12   grid {}^3   {:.1f} fps   vorticity {:.1f}   density {:.2f}   emission {:.2f}   light {:.1f}   exposure {:.2f}   wind {:.1f}{}",
-        m_solver.GetResolution(),
+        L"SmokeDX12   grid {}x{}x{}   {:.1f} fps   vorticity {:.1f}   density {:.2f}   emission {:.2f}   light {:.1f}   exposure {:.2f}   wind {:.1f}{}",
+        m_solver.GetResolutionX(),
+        m_solver.GetResolutionY(),
+        m_solver.GetResolutionZ(),
         fps,
         m_fluidSettings.vorticityStrength,
         m_renderSettings.densityScale,

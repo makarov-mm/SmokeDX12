@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -13,12 +14,13 @@ class ShaderLibrary;
 // Tunable parameters of the simulation, all of them are safe to change at run time.
 struct FluidSettings
 {
-    float emitterPosition[3] = { 0.42f, 0.07f, 0.5f };
-    float emitterRadius = 0.085f;
+    // Position is in normalised grid coordinates, the radius is in box units.
+    float emitterPosition[3] = { 0.30f, 0.045f, 0.5f };
+    float emitterRadius = 0.10f;
     float emitterVelocity[3] = { 0.0f, 26.0f, 0.0f };
     float emitDensity = 0.85f;
     float emitTemperature = 2.6f;
-    float buoyancy = 16.0f;
+    float buoyancy = 20.0f;
     float gravity = 1.0f;
     float ambientTemperature = 0.0f;
     float vorticityStrength = 24.0f;
@@ -27,7 +29,7 @@ struct FluidSettings
     float velocityDissipation = 0.9995f;
 
     float windDirection[3] = { 1.0f, 0.0f, 0.15f };
-    float windStrength = 14.0f;
+    float windStrength = 10.0f;
     float windGustFrequency = 0.35f;
     float windDrag = 1.6f;
 
@@ -69,7 +71,13 @@ struct FluidConstants
 class FluidSolver
 {
 public:
-    bool Initialize(ID3D12Device* device, DescriptorAllocator* allocator, ShaderLibrary* shaders, uint32_t resolution);
+    bool Initialize(
+        ID3D12Device* device,
+        DescriptorAllocator* allocator,
+        ShaderLibrary* shaders,
+        uint32_t resolutionX,
+        uint32_t resolutionY,
+        uint32_t resolutionZ);
     bool CreatePipelines();
 
     void RequestReset() { m_resetRequested = true; }
@@ -77,7 +85,16 @@ public:
 
     GpuTexture3D& GetDensity() { return m_density[m_densityIndex]; }
     GpuTexture3D& GetTemperature() { return m_temperature[m_temperatureIndex]; }
-    uint32_t GetResolution() const { return m_resolution; }
+
+    uint32_t GetResolutionX() const { return m_resolutionX; }
+    uint32_t GetResolutionY() const { return m_resolutionY; }
+    uint32_t GetResolutionZ() const { return m_resolutionZ; }
+
+    // World size of the box: cells are cubic, so the aspect is the grid size
+    // normalised by its smallest axis.
+    float GetBoxSizeX() const { return static_cast<float>(m_resolutionX) / SmallestAxis(); }
+    float GetBoxSizeY() const { return static_cast<float>(m_resolutionY) / SmallestAxis(); }
+    float GetBoxSizeZ() const { return static_cast<float>(m_resolutionZ) / SmallestAxis(); }
 
     enum class PipelineId : size_t
     {
@@ -125,8 +142,17 @@ private:
     GpuTexture3D m_dummyScalarSrv;
     GpuTexture3D m_dummyScalarUav;
 
-    uint32_t m_resolution = 128;
-    uint32_t m_groupCount = 16;
+    float SmallestAxis() const
+    {
+        return static_cast<float>(std::min({ m_resolutionX, m_resolutionY, m_resolutionZ }));
+    }
+
+    uint32_t m_resolutionX = 128;
+    uint32_t m_resolutionY = 128;
+    uint32_t m_resolutionZ = 128;
+    uint32_t m_groupCountX = 16;
+    uint32_t m_groupCountY = 16;
+    uint32_t m_groupCountZ = 16;
 
     uint32_t m_velocityIndex = 0;
     uint32_t m_densityIndex = 0;

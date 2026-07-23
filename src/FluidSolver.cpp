@@ -26,13 +26,23 @@ namespace
     };
 }
 
-bool FluidSolver::Initialize(ID3D12Device* device, DescriptorAllocator* allocator, ShaderLibrary* shaders, uint32_t resolution)
+bool FluidSolver::Initialize(
+    ID3D12Device* device,
+    DescriptorAllocator* allocator,
+    ShaderLibrary* shaders,
+    uint32_t resolutionX,
+    uint32_t resolutionY,
+    uint32_t resolutionZ)
 {
     m_device = device;
     m_allocator = allocator;
     m_shaders = shaders;
-    m_resolution = resolution;
-    m_groupCount = (resolution + 7) / 8;
+    m_resolutionX = resolutionX;
+    m_resolutionY = resolutionY;
+    m_resolutionZ = resolutionZ;
+    m_groupCountX = (resolutionX + 7) / 8;
+    m_groupCountY = (resolutionY + 7) / 8;
+    m_groupCountZ = (resolutionZ + 7) / 8;
 
     if (!CreateRootSignature())
     {
@@ -144,21 +154,23 @@ bool FluidSolver::CreatePipelines()
 
 bool FluidSolver::CreateTextures()
 {
-    const uint32_t size = m_resolution;
+    const uint32_t x = m_resolutionX;
+    const uint32_t y = m_resolutionY;
+    const uint32_t z = m_resolutionZ;
     const DXGI_FORMAT vectorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     const DXGI_FORMAT scalarFormat = DXGI_FORMAT_R16_FLOAT;
     const D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     bool ok = true;
-    ok = ok && m_velocity[0].Create(m_device, *m_allocator, size, size, size, vectorFormat, initialState, L"VelocityA");
-    ok = ok && m_velocity[1].Create(m_device, *m_allocator, size, size, size, vectorFormat, initialState, L"VelocityB");
-    ok = ok && m_density[0].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"DensityA");
-    ok = ok && m_density[1].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"DensityB");
-    ok = ok && m_temperature[0].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"TemperatureA");
-    ok = ok && m_temperature[1].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"TemperatureB");
-    ok = ok && m_pressure[0].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"PressureA");
-    ok = ok && m_pressure[1].Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"PressureB");
-    ok = ok && m_divergence.Create(m_device, *m_allocator, size, size, size, scalarFormat, initialState, L"Divergence");
+    ok = ok && m_velocity[0].Create(m_device, *m_allocator, x, y, z, vectorFormat, initialState, L"VelocityA");
+    ok = ok && m_velocity[1].Create(m_device, *m_allocator, x, y, z, vectorFormat, initialState, L"VelocityB");
+    ok = ok && m_density[0].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"DensityA");
+    ok = ok && m_density[1].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"DensityB");
+    ok = ok && m_temperature[0].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"TemperatureA");
+    ok = ok && m_temperature[1].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"TemperatureB");
+    ok = ok && m_pressure[0].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"PressureA");
+    ok = ok && m_pressure[1].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"PressureB");
+    ok = ok && m_divergence.Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"Divergence");
 
     // One by one by one placeholders that stay in a fixed resource state forever.
     ok = ok && m_dummyVectorSrv.Create(m_device, *m_allocator, 1, 1, 1, vectorFormat, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"DummyVectorSrv");
@@ -182,7 +194,7 @@ void FluidSolver::Dispatch(
 
     commandList->SetComputeRootDescriptorTable(1, srvTable);
     commandList->SetComputeRootDescriptorTable(2, uavTable);
-    commandList->Dispatch(m_groupCount, m_groupCount, m_groupCount);
+    commandList->Dispatch(m_groupCountX, m_groupCountY, m_groupCountZ);
 }
 
 void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
@@ -244,9 +256,9 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
     commandList->SetComputeRootSignature(m_rootSignature.Get());
 
     FluidConstants constants = {};
-    constants.gridSize[0] = m_resolution;
-    constants.gridSize[1] = m_resolution;
-    constants.gridSize[2] = m_resolution;
+    constants.gridSize[0] = m_resolutionX;
+    constants.gridSize[1] = m_resolutionY;
+    constants.gridSize[2] = m_resolutionZ;
     constants.dt = dt;
     constants.emitterPosition[0] = settings.emitterPosition[0];
     constants.emitterPosition[1] = settings.emitterPosition[1];

@@ -19,8 +19,8 @@ public:
 
 private:
     DirectX::XMFLOAT3 m_target = { 0.0f, 0.0f, 0.0f };
-    float m_yaw = 0.7f;
-    float m_pitch = 0.26f;
-    float m_distance = 2.7f;
+    float m_yaw = 0.55f;
+    float m_pitch = 0.18f;
+    float m_distance = 4.2f;
     float m_fieldOfView = 0.9f;
 };
