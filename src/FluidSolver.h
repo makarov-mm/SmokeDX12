@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <array>
 #include <cstdint>
 
 #include "GpuTexture3D.h"
@@ -12,22 +13,28 @@ class ShaderLibrary;
 // Tunable parameters of the simulation, all of them are safe to change at run time.
 struct FluidSettings
 {
-    float emitterPosition[3] = { 0.5f, 0.10f, 0.5f };
-    float emitterRadius = 0.06f;
-    float emitterVelocity[3] = { 0.0f, 30.0f, 0.0f };
-    float emitDensity = 1.2f;
-    float emitTemperature = 3.5f;
-    float buoyancy = 14.0f;
-    float gravity = 0.9f;
+    float emitterPosition[3] = { 0.42f, 0.07f, 0.5f };
+    float emitterRadius = 0.085f;
+    float emitterVelocity[3] = { 0.0f, 26.0f, 0.0f };
+    float emitDensity = 0.85f;
+    float emitTemperature = 2.6f;
+    float buoyancy = 16.0f;
+    float gravity = 1.0f;
     float ambientTemperature = 0.0f;
-    float vorticityStrength = 14.0f;
-    float densityDissipation = 0.990f;
-    float temperatureDissipation = 0.965f;
-    float velocityDissipation = 0.999f;
+    float vorticityStrength = 24.0f;
+    float densityDissipation = 0.9990f;
+    float temperatureDissipation = 0.9930f;
+    float velocityDissipation = 0.9995f;
+
+    float windDirection[3] = { 1.0f, 0.0f, 0.15f };
+    float windStrength = 14.0f;
+    float windGustFrequency = 0.35f;
+    float windDrag = 1.6f;
+
     int pressureIterations = 40;
 };
 
-// Constant buffer layout shared with Fluid.hlsl. Exactly 24 root constants.
+// Constant buffer layout shared with Fluid.hlsl. Exactly 28 root constants.
 struct FluidConstants
 {
     uint32_t gridSize[3];
@@ -50,7 +57,12 @@ struct FluidConstants
     float gravity;
 
     float velocityDissipation;
-    float padding[3];
+    float windStrength;
+    float windGustFrequency;
+    float windDrag;
+
+    float windDirection[3];
+    float padding;
 };
 
 // Eulerian smoke solver. Every stage is a compute dispatch over the whole grid.
@@ -67,21 +79,23 @@ public:
     GpuTexture3D& GetTemperature() { return m_temperature[m_temperatureIndex]; }
     uint32_t GetResolution() const { return m_resolution; }
 
-private:
-    enum PipelineId
+    enum class PipelineId : size_t
     {
-        PipelineClearScalar = 0,
-        PipelineClearVelocity,
-        PipelineInject,
-        PipelineForces,
-        PipelineAdvectVelocity,
-        PipelineDivergence,
-        PipelineJacobi,
-        PipelineProject,
-        PipelineAdvectScalars,
-        PipelineCount
+        ClearScalar = 0,
+        ClearVelocity,
+        Inject,
+        Forces,
+        AdvectVelocity,
+        Divergence,
+        Jacobi,
+        Project,
+        AdvectScalars,
+        Count
     };
 
+    static constexpr size_t PipelineCount = static_cast<size_t>(PipelineId::Count);
+
+private:
     bool CreateRootSignature();
     bool CreateTextures();
 
@@ -97,7 +111,7 @@ private:
     ShaderLibrary* m_shaders = nullptr;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pipelines[PipelineCount];
+    std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, PipelineCount> m_pipelines;
 
     GpuTexture3D m_velocity[2];
     GpuTexture3D m_density[2];

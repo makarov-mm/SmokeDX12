@@ -26,9 +26,12 @@ cbuffer FluidConstants : register(b0)
     float Gravity;
 
     float VelocityDissipation;
+    float WindStrength;
+    float WindGustFrequency;
+    float WindDrag;
+
+    float3 WindDirection;
     float Padding0;
-    float Padding1;
-    float Padding2;
 };
 
 SamplerState LinearClamp : register(s0);
@@ -171,19 +174,34 @@ void CSInject(uint3 id : SV_DispatchThreadID)
     }
 
     float3 uvw = CellToUvw(id);
-    float3 offset = uvw - EmitterPosition;
+
+    // The source wanders slowly, which is enough to stop the plume from growing
+    // as a perfectly symmetric mushroom.
+    float3 center = EmitterPosition;
+    center.x += (Noise(float3(Time * 0.37f, 0.0f, 0.0f)) - 0.5f) * EmitterRadius * 0.8f;
+    center.z += (Noise(float3(0.0f, 0.0f, Time * 0.31f + 17.0f)) - 0.5f) * EmitterRadius * 0.8f;
+
+    float3 offset = uvw - center;
     float radialDistance = length(offset);
-    float falloff = saturate(1.0f - radialDistance / max(EmitterRadius, 1e-5f));
-    falloff = falloff * falloff;
+    float falloff = 1.0f - smoothstep(EmitterRadius * 0.25f, EmitterRadius, radialDistance);
 
-    float turbulence = Noise(uvw * 16.0f + float3(0.0f, -Time * 1.9f, Time * 0.6f)) - 0.5f;
+    // Break the shell of the source up so the plume gets structure straight away.
+    float shellNoise = Noise(uvw * 24.0f + float3(0.0f, -Time * 2.6f, Time * 0.9f));
+    float shaped = falloff * (0.55f + 0.9f * shellNoise);
 
-    float density = SourceScalarA[id] + EmitDensity * falloff * Dt;
-    float temperature = SourceScalarB[id] + EmitTemperature * falloff * Dt;
+    float density = SourceScalarA[id] + EmitDensity * shaped * Dt;
+    float temperature = SourceScalarB[id] + EmitTemperature * shaped * Dt;
 
     float3 velocity = SourceVelocity[id].xyz;
-    float3 swirl = cross(float3(0.0f, 1.0f, 0.0f), offset) * 40.0f;
-    velocity += (EmitterVelocity + swirl * turbulence) * falloff * Dt;
+
+    float3 swirl = cross(float3(0.0f, 1.0f, 0.0f), offset);
+    float3 turbulence = float3(
+        Noise(uvw * 11.0f + float3(Time * 1.4f, 0.0f, 0.0f)) - 0.5f,
+        Noise(uvw * 11.0f + float3(0.0f, Time * 1.1f + 7.0f, 0.0f)) - 0.5f,
+        Noise(uvw * 11.0f + float3(0.0f, 0.0f, Time * 1.2f + 23.0f)) - 0.5f) * 2.0f;
+
+    float3 injected = EmitterVelocity + swirl * 55.0f * (shellNoise - 0.5f) + turbulence * 22.0f;
+    velocity += injected * falloff * Dt;
 
     TargetVelocity[id] = float4(velocity, 0.0f);
     TargetScalarA[id] = density;
@@ -216,6 +234,20 @@ void CSForces(uint3 id : SV_DispatchThreadID)
 
     float lift = Buoyancy * (temperature - AmbientTemperature) - Gravity * density;
     velocity += Dt * lift * float3(0.0f, 1.0f, 0.0f);
+
+    // Wind is modelled as drag towards a target field instead of a constant
+    // force, so it cannot accelerate the gas beyond the wind speed itself.
+    // Gusts modulate the strength and slowly steer the direction over time,
+    // and the whole thing fades in with height so the source stays anchored.
+    float3 uvw = CellToUvw(id);
+    float gust = 0.55f + 0.65f * Noise(float3(Time * WindGustFrequency, uvw.y * 2.0f, 7.0f));
+    float steer = (Noise(float3(3.0f, Time * WindGustFrequency * 0.35f, 11.0f)) - 0.5f) * 1.2f;
+
+    float3 windDirection = normalize(WindDirection + float3(-steer * WindDirection.z, 0.0f, steer * WindDirection.x));
+    float heightFade = smoothstep(0.08f, 0.45f, uvw.y);
+
+    float3 windTarget = windDirection * WindStrength * gust * heightFade;
+    velocity += (windTarget - velocity) * saturate(WindDrag * Dt);
 
     // Vorticity confinement puts back the small scale rotation that advection smears out.
     int3 cell = int3(id);

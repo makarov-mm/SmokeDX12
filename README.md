@@ -1,6 +1,7 @@
 # SmokeDX12
 
-A real time 3D smoke simulation written in C++17 and Direct3D 12.
+A real time 3D smoke simulation written in modern C++ (built with `/std:c++latest`)
+and Direct3D 12.
 
 The whole simulation runs on the GPU as a chain of compute dispatches over a
 volumetric grid, and the result is displayed with a single pass volumetric ray
@@ -21,7 +22,7 @@ Each simulation step is eight compute passes:
 | Stage | Pass | What happens |
 | --- | --- | --- |
 | 1 | `CSInject` | Density, temperature and momentum are added inside the emitter sphere, modulated by value noise so the plume is not perfectly symmetric. |
-| 2 | `CSForces` | Thermal buoyancy `b(T - T_ambient)` minus the weight of the smoke `g*rho`, followed by vorticity confinement that restores the small scale rotation numerical diffusion destroys. |
+| 2 | `CSForces` | Thermal buoyancy `b(T - T_ambient)` minus the weight of the smoke `g*rho`, vorticity confinement that restores the small scale rotation numerical diffusion destroys, and wind. |
 | 3 | `CSAdvectVelocity` | Semi Lagrangian self advection: trace each cell backwards along its own velocity and sample the field there with hardware trilinear filtering. |
 | 4 | `CSDivergence` | Central differences give the divergence of the intermediate field. |
 | 5 | `CSClearScalar` | Pressure is reset before the iterative solve. |
@@ -29,11 +30,46 @@ Each simulation step is eight compute passes:
 | 7 | `CSProject` | Subtracting the pressure gradient makes the field divergence free, which is what enforces incompressibility. |
 | 8 | `CSAdvectScalars` | Density and temperature are transported by the corrected velocity field, with exponential dissipation and cooling towards the ambient temperature. |
 
-Rendering integrates the radiative transfer equation front to back along the
-view ray. At every sample a secondary march towards the light accumulates
-optical depth, which gives real self shadowing inside the plume. Emission is
-driven by the temperature field through a blackbody style ramp, so hot gas near
-the source glows and cools to grey smoke as it rises.
+
+### Wind
+
+Wind is not a constant force. A constant force keeps accelerating the gas
+forever, which looks like the smoke being fired out of a cannon. Instead the
+solver relaxes the velocity field towards a target wind field:
+
+```
+u += (u_wind - u) * saturate(drag * dt)
+```
+
+so the gas can never exceed the wind speed itself. The target field is modulated
+by gusts (low frequency noise over time and height), its direction slowly
+meanders, and the whole thing fades in with altitude so the base of the plume
+stays attached to the source while the column above it bends and tears
+downwind. Strength and direction are adjustable live with the arrow keys.
+
+### Rendering
+
+The pixel shader resolves the background first, an infinite ground plane or the
+sky, and then integrates the radiative transfer equation front to back through
+the simulation box and composites the result over it.
+
+* **Self shadowing.** At every sample a secondary march towards the light
+  accumulates optical depth through the volume.
+* **Multiple scattering approximation.** That same optical depth is reused
+  across three octaves with progressively weaker extinction, weaker
+  contribution and a flatter phase function. It costs nothing extra in samples
+  and is the difference between fluffy smoke and a black silhouette.
+* **Henyey Greenstein phase function**, so the plume brightens when the light is
+  behind it.
+* **Cast shadows on the ground.** Ground pixels run the same optical depth march
+  towards the light, so the plume actually darkens the floor underneath it.
+* **Emission from temperature** through a blackbody style ramp normalised by a
+  reference temperature, with a steep falloff so only the genuinely hot core
+  glows and the rest cools into grey smoke.
+* **Interleaved gradient noise** jitters the march start offset to trade banding
+  for a small amount of noise, plus a filmic tone map at the end.
+* An antialiased procedural grid on the floor, distance fog, a sun disc in the
+  sky and a warm bounce pool of light under the source.
 
 ## Requirements
 
@@ -80,12 +116,21 @@ goes to the debug output and the previous pipelines keep running.
 | Left mouse drag | Orbit the camera |
 | Mouse wheel | Zoom |
 | `Space` | Pause and resume the simulation |
+| `T` | Toggle the slow turntable rotation |
 | `R` | Recompile all shaders |
 | `Backspace` | Reset the simulation to an empty grid |
 | `Q` / `E` | Decrease or increase vorticity confinement |
 | `Z` / `X` | Decrease or increase the rendered density scale |
 | `C` / `V` | Decrease or increase the emission scale |
+| `F` / `G` | Decrease or increase the light intensity |
+| `1` / `2` | Decrease or increase the exposure |
+| `Left` / `Right` | Decrease or increase the wind strength |
+| `Up` / `Down` | Rotate the wind direction |
 | `Esc` | Quit |
+
+The current value of every tunable parameter is shown in the window title, so
+dialling in a look and then copying the numbers back into the defaults in
+`FluidSolver.h` and `VolumeRenderer.h` is the intended workflow.
 
 ## Project layout
 
@@ -94,7 +139,7 @@ SmokeDX12.sln
 SmokeDX12.vcxproj
 shaders/
   Fluid.hlsl            all eight compute stages of the solver
-  VolumeRender.hlsl     fullscreen triangle and the volumetric ray marcher
+  VolumeRender.hlsl     fullscreen triangle, environment and the ray marcher
 src/
   Main.cpp              entry point
   Application.*         main loop, input handling, per frame orchestration

@@ -10,21 +10,34 @@ class DescriptorAllocator;
 class ShaderLibrary;
 class GpuTexture3D;
 
-// Look of the volume, independent from the physics.
+// Look of the scene, independent from the physics.
 struct RenderSettings
 {
-    float densityScale = 1.6f;
-    float absorption = 26.0f;
-    float emissionScale = 2.4f;
-    float exposure = 1.5f;
-    float lightDirection[3] = { -0.45f, 0.75f, -0.48f };
-    float lightColor[3] = { 1.0f, 0.94f, 0.86f };
-    float lightIntensity = 3.2f;
-    int stepCount = 160;
-    int shadowSteps = 12;
+    float densityScale = 1.4f;
+    float absorption = 34.0f;
+    float emissionScale = 1.1f;
+    float exposure = 1.35f;
+    float temperatureReference = 5.0f;
+
+    float lightDirection[3] = { -0.42f, 0.68f, -0.58f };
+    float lightColor[3] = { 1.00f, 0.93f, 0.82f };
+    float lightIntensity = 18.0f;
+
+    float ambientColor[3] = { 0.070f, 0.090f, 0.140f };
+    float skyTopColor[3] = { 0.026f, 0.048f, 0.100f };
+    float skyBottomColor[3] = { 0.105f, 0.118f, 0.150f };
+    float floorColor[3] = { 0.040f, 0.043f, 0.052f };
+
+    float floorHeight = -0.5f;
+    float fogDensity = 0.035f;
+    float anisotropy = 0.40f;
+    float gridScale = 4.0f;
+
+    int stepCount = 128;
+    int shadowSteps = 10;
 };
 
-// Constant buffer layout shared with VolumeRender.hlsl. Exactly 32 root constants.
+// Constant buffer layout shared with VolumeRender.hlsl. Exactly 48 root constants.
 struct RenderConstants
 {
     float cameraPosition[3];
@@ -51,7 +64,19 @@ struct RenderConstants
     float emissionScale;
     float shadowSteps;
     float time;
-    float padding;
+    float temperatureReference;
+
+    float skyTopColor[3];
+    float floorHeight;
+
+    float skyBottomColor[3];
+    float fogDensity;
+
+    float floorColor[3];
+    float anisotropy;
+
+    float ambientColor[3];
+    float gridScale;
 };
 
 class VolumeRenderer

@@ -210,7 +210,27 @@ void VolumeRenderer::Render(
     constants.emissionScale = settings.emissionScale;
     constants.shadowSteps = static_cast<float>(settings.shadowSteps);
     constants.time = time;
-    constants.padding = 0.0f;
+    constants.temperatureReference = settings.temperatureReference;
+
+    constants.skyTopColor[0] = settings.skyTopColor[0];
+    constants.skyTopColor[1] = settings.skyTopColor[1];
+    constants.skyTopColor[2] = settings.skyTopColor[2];
+    constants.floorHeight = settings.floorHeight;
+
+    constants.skyBottomColor[0] = settings.skyBottomColor[0];
+    constants.skyBottomColor[1] = settings.skyBottomColor[1];
+    constants.skyBottomColor[2] = settings.skyBottomColor[2];
+    constants.fogDensity = settings.fogDensity;
+
+    constants.floorColor[0] = settings.floorColor[0];
+    constants.floorColor[1] = settings.floorColor[1];
+    constants.floorColor[2] = settings.floorColor[2];
+    constants.anisotropy = settings.anisotropy;
+
+    constants.ambientColor[0] = settings.ambientColor[0];
+    constants.ambientColor[1] = settings.ambientColor[1];
+    constants.ambientColor[2] = settings.ambientColor[2];
+    constants.gridScale = settings.gridScale;
 
     commandList->SetGraphicsRoot32BitConstants(0, sizeof(RenderConstants) / sizeof(uint32_t), &constants, 0);
 

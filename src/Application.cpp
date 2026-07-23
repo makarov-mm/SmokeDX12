@@ -3,21 +3,22 @@
 #include <Windows.h>
 
 #include <algorithm>
-#include <cstdio>
+#include <cmath>
+#include <format>
 #include <string>
 
 namespace
 {
-    const uint32_t InitialWidth = 1600;
-    const uint32_t InitialHeight = 900;
+    constexpr uint32_t InitialWidth = 1600;
+    constexpr uint32_t InitialHeight = 900;
 
     // Grid resolution of the simulation. 128 is a good default, 192 or 256 look
     // better and are still interactive on a modern discrete card.
-    const uint32_t GridResolution = 128;
+    constexpr uint32_t GridResolution = 128;
 
     // The solver runs at a fixed step, which keeps the simulation reproducible
     // and stops it from blowing up when the frame time spikes.
-    const float SimulationStep = 1.0f / 60.0f;
+    constexpr float SimulationStep = 1.0f / 60.0f;
 
     void ReportError(const wchar_t* message)
     {
@@ -109,7 +110,7 @@ bool Application::Initialize()
         return false;
     }
 
-    m_camera.SetTarget(DirectX::XMFLOAT3(0.0f, 0.05f, 0.0f));
+    m_camera.SetTarget(DirectX::XMFLOAT3(0.0f, 0.02f, 0.0f));
     return true;
 }
 
@@ -145,6 +146,11 @@ void Application::HandleInput(float deltaTime)
         m_solver.RequestReset();
     }
 
+    if (m_window.ConsumeKeyPress('T'))
+    {
+        m_turntable = !m_turntable;
+    }
+
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;
     m_window.ConsumeMouseDelta(mouseDeltaX, mouseDeltaY);
@@ -158,29 +164,69 @@ void Application::HandleInput(float deltaTime)
 
     if (m_window.IsKeyDown('Q'))
     {
-        m_fluidSettings.vorticityStrength = std::max(0.0f, m_fluidSettings.vorticityStrength - 12.0f * deltaTime);
+        m_fluidSettings.vorticityStrength = std::clamp(m_fluidSettings.vorticityStrength - 12.0f * deltaTime, 0.0f, 60.0f);
     }
     if (m_window.IsKeyDown('E'))
     {
-        m_fluidSettings.vorticityStrength = std::min(60.0f, m_fluidSettings.vorticityStrength + 12.0f * deltaTime);
+        m_fluidSettings.vorticityStrength = std::clamp(m_fluidSettings.vorticityStrength + 12.0f * deltaTime, 0.0f, 60.0f);
     }
 
     if (m_window.IsKeyDown('Z'))
     {
-        m_renderSettings.densityScale = std::max(0.05f, m_renderSettings.densityScale - 1.2f * deltaTime);
+        m_renderSettings.densityScale = std::clamp(m_renderSettings.densityScale - 1.2f * deltaTime, 0.05f, 12.0f);
     }
     if (m_window.IsKeyDown('X'))
     {
-        m_renderSettings.densityScale = std::min(12.0f, m_renderSettings.densityScale + 1.2f * deltaTime);
+        m_renderSettings.densityScale = std::clamp(m_renderSettings.densityScale + 1.2f * deltaTime, 0.05f, 12.0f);
     }
 
     if (m_window.IsKeyDown('C'))
     {
-        m_renderSettings.emissionScale = std::max(0.0f, m_renderSettings.emissionScale - 2.0f * deltaTime);
+        m_renderSettings.emissionScale = std::clamp(m_renderSettings.emissionScale - 2.0f * deltaTime, 0.0f, 20.0f);
     }
     if (m_window.IsKeyDown('V'))
     {
-        m_renderSettings.emissionScale = std::min(20.0f, m_renderSettings.emissionScale + 2.0f * deltaTime);
+        m_renderSettings.emissionScale = std::clamp(m_renderSettings.emissionScale + 2.0f * deltaTime, 0.0f, 20.0f);
+    }
+
+    if (m_window.IsKeyDown('F'))
+    {
+        m_renderSettings.lightIntensity = std::clamp(m_renderSettings.lightIntensity - 12.0f * deltaTime, 0.0f, 80.0f);
+    }
+    if (m_window.IsKeyDown('G'))
+    {
+        m_renderSettings.lightIntensity = std::clamp(m_renderSettings.lightIntensity + 12.0f * deltaTime, 0.0f, 80.0f);
+    }
+
+    if (m_window.IsKeyDown('1'))
+    {
+        m_renderSettings.exposure = std::clamp(m_renderSettings.exposure - 0.8f * deltaTime, 0.15f, 6.0f);
+    }
+    if (m_window.IsKeyDown('2'))
+    {
+        m_renderSettings.exposure = std::clamp(m_renderSettings.exposure + 0.8f * deltaTime, 0.15f, 6.0f);
+    }
+
+    if (m_window.IsKeyDown(VK_LEFT))
+    {
+        m_fluidSettings.windStrength = std::clamp(m_fluidSettings.windStrength - 10.0f * deltaTime, 0.0f, 60.0f);
+    }
+    if (m_window.IsKeyDown(VK_RIGHT))
+    {
+        m_fluidSettings.windStrength = std::clamp(m_fluidSettings.windStrength + 10.0f * deltaTime, 0.0f, 60.0f);
+    }
+
+    if (m_window.IsKeyDown(VK_UP) || m_window.IsKeyDown(VK_DOWN))
+    {
+        // Rotate the wind direction around the vertical axis.
+        const float sign = m_window.IsKeyDown(VK_UP) ? 1.0f : -1.0f;
+        const float angle = sign * 0.9f * deltaTime;
+        const float sine = std::sin(angle);
+        const float cosine = std::cos(angle);
+        const float x = m_fluidSettings.windDirection[0];
+        const float z = m_fluidSettings.windDirection[2];
+        m_fluidSettings.windDirection[0] = x * cosine - z * sine;
+        m_fluidSettings.windDirection[2] = x * sine + z * cosine;
     }
 }
 
@@ -189,6 +235,11 @@ void Application::Update(float deltaTime)
     if (!m_paused)
     {
         m_time += SimulationStep;
+    }
+
+    if (m_turntable)
+    {
+        m_camera.Orbit(deltaTime * 0.18f, 0.0f);
     }
 
     m_smoothedFrameTime = m_smoothedFrameTime * 0.94f + deltaTime * 0.06f;
@@ -246,16 +297,17 @@ void Application::UpdateTitle(float deltaTime)
 
     const float fps = m_smoothedFrameTime > 0.0f ? 1.0f / m_smoothedFrameTime : 0.0f;
 
-    wchar_t buffer[256];
-    swprintf_s(
-        buffer,
-        L"SmokeDX12   grid %u^3   %.1f fps   vorticity %.1f   density %.2f   emission %.2f%s",
+    const std::wstring title = std::format(
+        L"SmokeDX12   grid {}^3   {:.1f} fps   vorticity {:.1f}   density {:.2f}   emission {:.2f}   light {:.1f}   exposure {:.2f}   wind {:.1f}{}",
         m_solver.GetResolution(),
         fps,
         m_fluidSettings.vorticityStrength,
         m_renderSettings.densityScale,
         m_renderSettings.emissionScale,
+        m_renderSettings.lightIntensity,
+        m_renderSettings.exposure,
+        m_fluidSettings.windStrength,
         m_paused ? L"   [paused]" : L"");
 
-    m_window.SetTitle(buffer);
+    m_window.SetTitle(title);
 }

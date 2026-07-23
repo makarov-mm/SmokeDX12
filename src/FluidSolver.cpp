@@ -2,6 +2,9 @@
 
 #include <d3dcompiler.h>
 
+#include <array>
+#include <utility>
+
 #include "DescriptorAllocator.h"
 #include "ShaderLibrary.h"
 
@@ -9,22 +12,17 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-    struct PipelineDescription
+    constexpr std::array<const char*, FluidSolver::PipelineCount> EntryPoints =
     {
-        const char* entryPoint;
-    };
-
-    const PipelineDescription PipelineDescriptions[] =
-    {
-        { "CSClearScalar" },
-        { "CSClearVelocity" },
-        { "CSInject" },
-        { "CSForces" },
-        { "CSAdvectVelocity" },
-        { "CSDivergence" },
-        { "CSJacobi" },
-        { "CSProject" },
-        { "CSAdvectScalars" }
+        "CSClearScalar",
+        "CSClearVelocity",
+        "CSInject",
+        "CSForces",
+        "CSAdvectVelocity",
+        "CSDivergence",
+        "CSJacobi",
+        "CSProject",
+        "CSAdvectScalars"
     };
 }
 
@@ -117,11 +115,11 @@ bool FluidSolver::CreateRootSignature()
 
 bool FluidSolver::CreatePipelines()
 {
-    ComPtr<ID3D12PipelineState> compiled[PipelineCount];
+    std::array<ComPtr<ID3D12PipelineState>, PipelineCount> compiled;
 
-    for (int index = 0; index < PipelineCount; ++index)
+    for (size_t index = 0; index < PipelineCount; ++index)
     {
-        ComPtr<ID3DBlob> code = m_shaders->Compile(L"Fluid.hlsl", PipelineDescriptions[index].entryPoint, "cs_5_1");
+        ComPtr<ID3DBlob> code = m_shaders->Compile(L"Fluid.hlsl", EntryPoints[index], "cs_5_1");
         if (!code)
         {
             return false;
@@ -140,11 +138,7 @@ bool FluidSolver::CreatePipelines()
 
     // Only swap the pipelines in once every stage has compiled, so a typo in a
     // shader during hot reloading leaves the running simulation untouched.
-    for (int index = 0; index < PipelineCount; ++index)
-    {
-        m_pipelines[index] = compiled[index];
-    }
-
+    m_pipelines = std::move(compiled);
     return true;
 }
 
@@ -181,7 +175,7 @@ void FluidSolver::Dispatch(
     const D3D12_CPU_DESCRIPTOR_HANDLE* srvs,
     const D3D12_CPU_DESCRIPTOR_HANDLE* uavs)
 {
-    commandList->SetPipelineState(m_pipelines[pipeline].Get());
+    commandList->SetPipelineState(m_pipelines[static_cast<size_t>(pipeline)].Get());
 
     D3D12_GPU_DESCRIPTOR_HANDLE srvTable = m_allocator->CopyToShaderVisibleHeap(srvs, 4);
     D3D12_GPU_DESCRIPTOR_HANDLE uavTable = m_allocator->CopyToShaderVisibleHeap(uavs, 4);
@@ -221,7 +215,7 @@ void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
             m_dummyScalarUav.GetUav()
         };
 
-        Dispatch(commandList, PipelineClearScalar, srvs, uavs);
+        Dispatch(commandList, PipelineId::ClearScalar, srvs, uavs);
     }
 
     for (int index = 0; index < 2; ++index)
@@ -236,7 +230,7 @@ void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
             m_dummyScalarUav.GetUav()
         };
 
-        Dispatch(commandList, PipelineClearVelocity, srvs, uavs);
+        Dispatch(commandList, PipelineId::ClearVelocity, srvs, uavs);
     }
 
     m_velocityIndex = 0;
@@ -271,6 +265,12 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
     constants.time = time;
     constants.gravity = settings.gravity;
     constants.velocityDissipation = settings.velocityDissipation;
+    constants.windStrength = settings.windStrength;
+    constants.windGustFrequency = settings.windGustFrequency;
+    constants.windDrag = settings.windDrag;
+    constants.windDirection[0] = settings.windDirection[0];
+    constants.windDirection[1] = settings.windDirection[1];
+    constants.windDirection[2] = settings.windDirection[2];
 
     commandList->SetComputeRoot32BitConstants(0, sizeof(FluidConstants) / sizeof(uint32_t), &constants, 0);
 
@@ -310,7 +310,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             targetVelocity.GetUav(), targetDensity.GetUav(), targetTemperature.GetUav(), dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineInject, srvs, uavs);
+        Dispatch(commandList, PipelineId::Inject, srvs, uavs);
 
         m_velocityIndex = 1 - m_velocityIndex;
         m_densityIndex = 1 - m_densityIndex;
@@ -338,7 +338,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineForces, srvs, uavs);
+        Dispatch(commandList, PipelineId::Forces, srvs, uavs);
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
@@ -359,7 +359,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineAdvectVelocity, srvs, uavs);
+        Dispatch(commandList, PipelineId::AdvectVelocity, srvs, uavs);
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
@@ -379,7 +379,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             dummyUavVector, m_divergence.GetUav(), dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineDivergence, srvs, uavs);
+        Dispatch(commandList, PipelineId::Divergence, srvs, uavs);
     }
 
     // Stage 5: clear the pressure field before the iterative solve.
@@ -396,7 +396,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             dummyUavVector, m_pressure[index].GetUav(), dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineClearScalar, srvs, uavs);
+        Dispatch(commandList, PipelineId::ClearScalar, srvs, uavs);
     }
 
     // Stage 6: Jacobi iterations of the pressure Poisson equation.
@@ -419,7 +419,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             dummyUavVector, targetPressure.GetUav(), dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineJacobi, srvs, uavs);
+        Dispatch(commandList, PipelineId::Jacobi, srvs, uavs);
         m_pressureIndex = 1 - m_pressureIndex;
     }
 
@@ -442,7 +442,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineProject, srvs, uavs);
+        Dispatch(commandList, PipelineId::Project, srvs, uavs);
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
@@ -469,7 +469,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
             dummyUavVector, targetDensity.GetUav(), targetTemperature.GetUav(), dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineAdvectScalars, srvs, uavs);
+        Dispatch(commandList, PipelineId::AdvectScalars, srvs, uavs);
 
         m_densityIndex = 1 - m_densityIndex;
         m_temperatureIndex = 1 - m_temperatureIndex;

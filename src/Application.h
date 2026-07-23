@@ -35,6 +35,7 @@ private:
     RenderSettings m_renderSettings;
 
     bool m_paused = false;
+    bool m_turntable = false;
     float m_time = 0.0f;
     float m_titleTimer = 0.0f;
     float m_smoothedFrameTime = 0.016f;
