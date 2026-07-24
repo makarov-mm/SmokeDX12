@@ -34,7 +34,7 @@ Each simulation step is eleven compute passes:
 | 3 | `CSAdvectVelocity` | Forward semi Lagrangian self advection: trace each cell backwards along its own velocity and sample the field there with hardware trilinear filtering. |
 | 4 | `CSAdvectVelocityCorrect` | The MacCormack correction of that step, clamped to the extrema of the trilinear footprint it read from. |
 | 5 | `CSDivergence` | Central differences give the divergence of the intermediate field. |
-| 6 | `CSJacobi` x 40 | Jacobi iterations of the pressure Poisson equation `laplacian(p) = div(u)`, Neumann on the solid walls, Dirichlet `p = 0` on the open top. Started from the previous frame's solution rather than from zero. |
+| 6 | `CSJacobi` x 40 | Jacobi iterations of the pressure Poisson equation `laplacian(p) = div(u)`, Neumann on the floor, Dirichlet `p = 0` on the other five faces. Started from the previous frame's solution rather than from zero. |
 | 7 | `CSProject` | Subtracting the pressure gradient makes the field divergence free, which is what enforces incompressibility. |
 | 8 | `CSAdvectScalars` | Forward semi Lagrangian transport of density and temperature by the corrected velocity field. |
 | 9 | `CSAdvectDensityCorrect` | MacCormack correction of the density, plus dissipation and the boundary fade. |
@@ -60,11 +60,27 @@ phi_new = phi_hat + (phi - phi_bar) / 2
 ```
 
 The correction is second order but not monotone, so on its own it overshoots and
-rings around sharp gradients. The result is clamped to the minimum and maximum of
-the eight cells the forward step interpolated between, which is the limiter from
-Selle et al. It costs one extra dispatch and one extra texture per field. A
-gaussian pulse advected two hundred times at CFL 0.5 keeps 83 percent of its peak
-under this scheme against 48 percent under the first order one.
+rings around sharp gradients. Cells whose corrected value falls outside the range
+of the eight values the forward step interpolated between are reverted to the
+first order result, which is the limiter from Selle et al. It costs one extra
+dispatch and one extra texture per field. A gaussian pulse advected two hundred
+times at CFL 0.5 keeps 83 percent of its peak under this scheme against 48
+percent under the first order one.
+
+Reverting is not the same as clamping to the edge of that range, and the
+difference is not cosmetic. Clamping keeps a biased extreme value, which makes
+advection behave like a max filter and pumps mass into the domain. Measured on a
+CPU port of this solver, clamping adds about 0.7 percent of the field's mass
+every step and reverting adds about 0.15 percent.
+
+That residual bias matters, because MacCormack also removes the sink the old
+scheme was silently relying on. First order advection was throwing away roughly
+two percent of the density per step as numerical diffusion, and that, not
+`densityDissipation`, was what balanced a source that runs forever. With the
+diffusion gone, the dissipation has to be stronger than the limiter bias or the
+domain fills up with a uniform fog whose silhouette is the box. At 0.999 it
+removes 0.1 percent per step against a 0.15 percent bias and the mass grows
+without bound; at 0.998 it removes 0.2 percent and the plume settles.
 
 Because advection no longer eats the small scales, vorticity confinement no
 longer has to be turned up to compensate for it, and the default came down from
@@ -73,14 +89,17 @@ the plume boil rather than swirl.
 
 ### Boundaries
 
-The floor and the four side walls are solid, the top is open. A sealed box has
-nowhere for a continuously fed plume to go, so the column reaches the lid and
-spreads sideways into a flat sheet, which is both wrong and immediately readable
-as wrong. The open top is a Dirichlet `p = 0` condition in the pressure solve,
-which lets mass leave the domain, and density is faded out in a thin shell along
-the top and the side walls so nothing accumulates against a boundary.
+Only the floor is solid. The box is a piece of open air, not a room. Every other
+face is an outlet: a Dirichlet `p = 0` condition in the pressure solve, with
+density faded out in a thin shell so nothing accumulates against a wall.
 
-Pinning the pressure at the outlet also fixes the constant that a pure Neumann
+Closing the side walls is worse than it sounds. It does not just stop the plume
+at the edge, it forces the wind driven part of it to turn round and come back
+down, and that return flow stirs the whole domain into a uniform fog. The mean
+vertical velocity was negative at almost every height with solid walls, and
+positive at every height once they were opened.
+
+Pinning the pressure at an outlet also fixes the constant that a pure Neumann
 problem leaves undetermined, which is what makes it safe to warm start the Jacobi
 solve from the previous frame. The same forty iterations then refine an already
 good guess instead of walking out from zero every frame.

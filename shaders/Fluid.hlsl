@@ -73,13 +73,13 @@ bool IsOutside(uint3 cell)
     return cell.x >= GridSize.x || cell.y >= GridSize.y || cell.z >= GridSize.z;
 }
 
-// The floor and the four side walls are solid. The top face is open: it is the
-// only place the plume can leave through, and a sealed lid is what makes smoke
-// spread out into a pancake against the ceiling.
+// Only the floor is solid. The box is a piece of open air, not a room: closing
+// the side walls forces the wind driven part of the plume to turn round and come
+// back down, and that return flow mixes the whole domain into a uniform fog
+// instead of leaving a plume behind.
 bool IsSolidBoundary(uint3 cell)
 {
-    return cell.x == 0u || cell.y == 0u || cell.z == 0u ||
-           cell.x + 1u == GridSize.x || cell.z + 1u == GridSize.z;
+    return cell.y == 0u;
 }
 
 float3 CellToUvw(uint3 cell)
@@ -102,22 +102,29 @@ float LoadScalarA(int3 cell)
     return SourceScalarA[uint3(ClampCell(cell))];
 }
 
-// Pressure boundaries. Clamping gives a zero gradient, which is the Neumann
-// condition of a solid wall. Above the top face the ghost value is zero, the
-// Dirichlet condition of an open outlet, and that is what lets the column of
-// gas actually leave the domain instead of piling up under a lid.
+// Pressure boundaries. Below the floor the ghost value is a copy of the cell,
+// which is the zero gradient Neumann condition of a solid wall. On the other
+// five faces it is zero, the Dirichlet condition of an open outlet, and that is
+// what lets gas leave the domain instead of recirculating inside it. Pinning the
+// pressure at an outlet also fixes the constant that a pure Neumann problem
+// leaves undetermined.
 float LoadPressure(int3 cell)
 {
-    if (cell.y >= int(GridSize.y))
+    if (cell.y < 0)
     {
-        return 0.0f;
+        return SourceScalarA[uint3(ClampCell(cell))];
     }
 
-    return SourceScalarA[uint3(ClampCell(cell))];
+    bool outside =
+        cell.x < 0 || cell.z < 0 ||
+        cell.x >= int(GridSize.x) || cell.y >= int(GridSize.y) || cell.z >= int(GridSize.z);
+
+    return outside ? 0.0f : SourceScalarA[uint3(ClampCell(cell))];
 }
 
-// Density and temperature are faded out in a thin shell along the open top and
-// the side walls, so nothing accumulates against a boundary as a flat sheet.
+// Density and temperature are faded out in a thin shell along the five open
+// faces, so nothing accumulates against a boundary as a flat sheet. The floor is
+// solid and is deliberately not faded, the source sits on it.
 float BoundaryFalloff(float3 uvw)
 {
     float fade = 1.0f - smoothstep(1.0f - BoundaryFade, 1.0f, uvw.y);
@@ -471,7 +478,10 @@ void CSAdvectVelocityCorrect(uint3 id : SV_DispatchThreadID)
 
     // The correction is only trustworthy inside the range of the values the
     // forward step interpolated between. Outside it the scheme overshoots and
-    // rings, so those cells fall back to the plain first order result.
+    // rings, so those cells fall back to the plain first order result. Clamping
+    // to the edge of the range instead of reverting looks equivalent and is not:
+    // it keeps a biased extreme value, which turns advection into a max filter
+    // and pumps mass into the domain every step.
     int3 baseCell = FootprintBase(uvw - offset);
     float3 minimum = float3(1e30f, 1e30f, 1e30f);
     float3 maximum = float3(-1e30f, -1e30f, -1e30f);
@@ -492,7 +502,11 @@ void CSAdvectVelocityCorrect(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    corrected = clamp(corrected, minimum, maximum);
+    if (any(corrected < minimum) || any(corrected > maximum))
+    {
+        corrected = forwardValue;
+    }
+
     TargetVelocity[id] = float4(corrected * DissipationOverStep(VelocityDissipation), 0.0f);
 }
 
@@ -639,7 +653,10 @@ void CSAdvectDensityCorrect(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    corrected = clamp(corrected, minimum, maximum);
+    if (corrected < minimum || corrected > maximum)
+    {
+        corrected = forwardValue;
+    }
 
     float density = max(corrected, 0.0f) * DissipationOverStep(DensityDissipation);
     TargetScalarA[id] = density * BoundaryFalloff(uvw);
@@ -689,7 +706,10 @@ void CSAdvectTemperatureCorrect(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    corrected = clamp(corrected, minimum, maximum);
+    if (corrected < minimum || corrected > maximum)
+    {
+        corrected = forwardValue;
+    }
 
     float temperature = lerp(AmbientTemperature, corrected, DissipationOverStep(TemperatureDissipation));
     TargetScalarA[id] = lerp(AmbientTemperature, temperature, BoundaryFalloff(uvw));

@@ -31,7 +31,11 @@ struct FluidSettings
     float vorticityStrength = 15.0f;
     float macCormackStrength = 1.0f;
 
-    float densityDissipation = 0.9990f;
+    // The MacCormack limiter is not conservative: reverting cells to first order
+    // biases the field upwards by about 0.15 percent of its mass per step. The
+    // dissipation has to be stronger than that or the domain fills up, which the
+    // numerical diffusion of the old first order scheme used to hide.
+    float densityDissipation = 0.9980f;
     float temperatureDissipation = 0.9930f;
     float velocityDissipation = 0.9995f;
 
