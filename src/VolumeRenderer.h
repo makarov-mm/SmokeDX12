@@ -33,11 +33,21 @@ struct RenderSettings
     float anisotropy = 0.40f;
     float gridScale = 4.0f;
 
-    int stepCount = 128;
-    int shadowSteps = 10;
+    // Sub grid detail. Strength is how deep the noise can bite into the field,
+    // scale is in cycles per world unit, drift is how fast the pattern travels
+    // with the plume in world units per second.
+    float detailStrength = 0.55f;
+    float detailScale = 9.0f;
+    float detailDrift = 0.22f;
+    float powderStrength = 0.45f;
+
+    // The shadow march grows its step exponentially, so a handful of samples
+    // now covers the same range the old uniform march needed ten for.
+    int stepCount = 160;
+    int shadowSteps = 8;
 };
 
-// Constant buffer layout shared with VolumeRender.hlsl. Exactly 48 root constants.
+// Constant buffer layout shared with VolumeRender.hlsl. Exactly 52 root constants.
 struct RenderConstants
 {
     float cameraPosition[3];
@@ -77,6 +87,11 @@ struct RenderConstants
 
     float ambientColor[3];
     float gridScale;
+
+    float detailStrength;
+    float detailScale;
+    float detailDrift;
+    float powderStrength;
 };
 
 class VolumeRenderer

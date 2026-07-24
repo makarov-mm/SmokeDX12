@@ -211,6 +211,24 @@ void Application::HandleInput(float deltaTime)
         m_renderSettings.exposure = std::clamp(m_renderSettings.exposure + 0.8f * deltaTime, 0.15f, 6.0f);
     }
 
+    if (m_window.IsKeyDown('N'))
+    {
+        m_renderSettings.detailStrength = std::clamp(m_renderSettings.detailStrength - 0.5f * deltaTime, 0.0f, 1.5f);
+    }
+    if (m_window.IsKeyDown('M'))
+    {
+        m_renderSettings.detailStrength = std::clamp(m_renderSettings.detailStrength + 0.5f * deltaTime, 0.0f, 1.5f);
+    }
+
+    if (m_window.IsKeyDown(VK_OEM_COMMA))
+    {
+        m_fluidSettings.turbulenceStrength = std::clamp(m_fluidSettings.turbulenceStrength - 4.0f * deltaTime, 0.0f, 30.0f);
+    }
+    if (m_window.IsKeyDown(VK_OEM_PERIOD))
+    {
+        m_fluidSettings.turbulenceStrength = std::clamp(m_fluidSettings.turbulenceStrength + 4.0f * deltaTime, 0.0f, 30.0f);
+    }
+
     if (m_window.IsKeyDown(VK_LEFT))
     {
         m_fluidSettings.windStrength = std::clamp(m_fluidSettings.windStrength - 10.0f * deltaTime, 0.0f, 60.0f);
@@ -305,12 +323,14 @@ void Application::UpdateTitle(float deltaTime)
     const float fps = m_smoothedFrameTime > 0.0f ? 1.0f / m_smoothedFrameTime : 0.0f;
 
     const std::wstring title = std::format(
-        L"SmokeDX12   grid {}x{}x{}   {:.1f} fps   vorticity {:.1f}   density {:.2f}   emission {:.2f}   light {:.1f}   exposure {:.2f}   wind {:.1f}{}",
+        L"SmokeDX12   grid {}x{}x{}   {:.1f} fps   vorticity {:.1f}   turbulence {:.1f}   detail {:.2f}   density {:.2f}   emission {:.2f}   light {:.1f}   exposure {:.2f}   wind {:.1f}{}",
         m_solver.GetResolutionX(),
         m_solver.GetResolutionY(),
         m_solver.GetResolutionZ(),
         fps,
         m_fluidSettings.vorticityStrength,
+        m_fluidSettings.turbulenceStrength,
+        m_renderSettings.detailStrength,
         m_renderSettings.densityScale,
         m_renderSettings.emissionScale,
         m_renderSettings.lightIntensity,

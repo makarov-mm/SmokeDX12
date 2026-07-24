@@ -19,10 +19,13 @@ namespace
         "CSInject",
         "CSForces",
         "CSAdvectVelocity",
+        "CSAdvectVelocityCorrect",
         "CSDivergence",
         "CSJacobi",
         "CSProject",
-        "CSAdvectScalars"
+        "CSAdvectScalars",
+        "CSAdvectDensityCorrect",
+        "CSAdvectTemperatureCorrect"
     };
 }
 
@@ -61,12 +64,12 @@ bool FluidSolver::CreateRootSignature()
 {
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;
+    ranges[0].NumDescriptors = SrvSlotCount;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 4;
+    ranges[1].NumDescriptors = UavSlotCount;
     ranges[1].BaseShaderRegister = 0;
     ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -172,6 +175,13 @@ bool FluidSolver::CreateTextures()
     ok = ok && m_pressure[1].Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"PressureB");
     ok = ok && m_divergence.Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"Divergence");
 
+    // Forward half of the MacCormack step. The correction pass needs the source
+    // field and the forward advected field at the same time, so they cannot
+    // share the ping pong pair.
+    ok = ok && m_velocityHat.Create(m_device, *m_allocator, x, y, z, vectorFormat, initialState, L"VelocityHat");
+    ok = ok && m_densityHat.Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"DensityHat");
+    ok = ok && m_temperatureHat.Create(m_device, *m_allocator, x, y, z, scalarFormat, initialState, L"TemperatureHat");
+
     // One by one by one placeholders that stay in a fixed resource state forever.
     ok = ok && m_dummyVectorSrv.Create(m_device, *m_allocator, 1, 1, 1, vectorFormat, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"DummyVectorSrv");
     ok = ok && m_dummyScalarSrv.Create(m_device, *m_allocator, 1, 1, 1, scalarFormat, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, L"DummyScalarSrv");
@@ -189,8 +199,8 @@ void FluidSolver::Dispatch(
 {
     commandList->SetPipelineState(m_pipelines[static_cast<size_t>(pipeline)].Get());
 
-    D3D12_GPU_DESCRIPTOR_HANDLE srvTable = m_allocator->CopyToShaderVisibleHeap(srvs, 4);
-    D3D12_GPU_DESCRIPTOR_HANDLE uavTable = m_allocator->CopyToShaderVisibleHeap(uavs, 4);
+    D3D12_GPU_DESCRIPTOR_HANDLE srvTable = m_allocator->CopyToShaderVisibleHeap(srvs, SrvSlotCount);
+    D3D12_GPU_DESCRIPTOR_HANDLE uavTable = m_allocator->CopyToShaderVisibleHeap(uavs, UavSlotCount);
 
     commandList->SetComputeRootDescriptorTable(1, srvTable);
     commandList->SetComputeRootDescriptorTable(2, uavTable);
@@ -199,12 +209,13 @@ void FluidSolver::Dispatch(
 
 void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
 {
-    const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+    const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
     {
         m_dummyVectorSrv.GetSrv(),
         m_dummyScalarSrv.GetSrv(),
         m_dummyScalarSrv.GetSrv(),
-        m_dummyScalarSrv.GetSrv()
+        m_dummyScalarSrv.GetSrv(),
+        m_dummyVectorSrv.GetSrv()
     };
 
     GpuTexture3D* scalars[] =
@@ -212,14 +223,15 @@ void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
         &m_density[0], &m_density[1],
         &m_temperature[0], &m_temperature[1],
         &m_pressure[0], &m_pressure[1],
-        &m_divergence
+        &m_divergence,
+        &m_densityHat, &m_temperatureHat
     };
 
     for (GpuTexture3D* texture : scalars)
     {
         texture->Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             m_dummyVectorUav.GetUav(),
             texture->GetUav(),
@@ -230,13 +242,15 @@ void FluidSolver::Reset(ID3D12GraphicsCommandList* commandList)
         Dispatch(commandList, PipelineId::ClearScalar, srvs, uavs);
     }
 
-    for (int index = 0; index < 2; ++index)
-    {
-        m_velocity[index].Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    GpuTexture3D* vectors[] = { &m_velocity[0], &m_velocity[1], &m_velocityHat };
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+    for (GpuTexture3D* texture : vectors)
+    {
+        texture->Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
-            m_velocity[index].GetUav(),
+            texture->GetUav(),
             m_dummyScalarUav.GetUav(),
             m_dummyScalarUav.GetUav(),
             m_dummyScalarUav.GetUav()
@@ -283,6 +297,10 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
     constants.windDirection[0] = settings.windDirection[0];
     constants.windDirection[1] = settings.windDirection[1];
     constants.windDirection[2] = settings.windDirection[2];
+    constants.macCormackStrength = settings.macCormackStrength;
+    constants.turbulenceStrength = settings.turbulenceStrength;
+    constants.turbulenceScale = settings.turbulenceScale;
+    constants.boundaryFade = settings.boundaryFade;
 
     commandList->SetComputeRoot32BitConstants(0, sizeof(FluidConstants) / sizeof(uint32_t), &constants, 0);
 
@@ -313,11 +331,11 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         targetDensity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         targetTemperature.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            sourceVelocity.GetSrv(), sourceDensity.GetSrv(), sourceTemperature.GetSrv(), dummySrvScalar
+            sourceVelocity.GetSrv(), sourceDensity.GetSrv(), sourceTemperature.GetSrv(), dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             targetVelocity.GetUav(), targetDensity.GetUav(), targetTemperature.GetUav(), dummyUavScalar
         };
@@ -329,7 +347,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         m_temperatureIndex = 1 - m_temperatureIndex;
     }
 
-    // Stage 2: buoyancy, weight and vorticity confinement.
+    // Stage 2: buoyancy, weight, vorticity confinement and turbulence.
     {
         GpuTexture3D& sourceVelocity = m_velocity[m_velocityIndex];
         GpuTexture3D& temperature = m_temperature[m_temperatureIndex];
@@ -341,11 +359,11 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         density.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         targetVelocity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            sourceVelocity.GetSrv(), temperature.GetSrv(), density.GetSrv(), dummySrvScalar
+            sourceVelocity.GetSrv(), temperature.GetSrv(), density.GetSrv(), dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
@@ -354,24 +372,44 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
-    // Stage 3: self advection of the velocity field.
+    // Stage 3a: forward semi Lagrangian step of the velocity field.
+    {
+        GpuTexture3D& sourceVelocity = m_velocity[m_velocityIndex];
+
+        sourceVelocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        m_velocityHat.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
+        {
+            sourceVelocity.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvScalar, dummySrvVector
+        };
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
+        {
+            m_velocityHat.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
+        };
+
+        Dispatch(commandList, PipelineId::AdvectVelocity, srvs, uavs);
+    }
+
+    // Stage 3b: MacCormack correction of the velocity field.
     {
         GpuTexture3D& sourceVelocity = m_velocity[m_velocityIndex];
         GpuTexture3D& targetVelocity = m_velocity[1 - m_velocityIndex];
 
         sourceVelocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        m_velocityHat.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         targetVelocity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            sourceVelocity.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvScalar
+            sourceVelocity.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvScalar, m_velocityHat.GetSrv()
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
 
-        Dispatch(commandList, PipelineId::AdvectVelocity, srvs, uavs);
+        Dispatch(commandList, PipelineId::AdvectVelocityCorrect, srvs, uavs);
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
@@ -382,11 +420,11 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         sourceVelocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         m_divergence.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            sourceVelocity.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvScalar
+            sourceVelocity.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             dummyUavVector, m_divergence.GetUav(), dummyUavScalar, dummyUavScalar
         };
@@ -394,24 +432,13 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         Dispatch(commandList, PipelineId::Divergence, srvs, uavs);
     }
 
-    // Stage 5: clear the pressure field before the iterative solve.
-    for (int index = 0; index < 2; ++index)
-    {
-        m_pressure[index].Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
-        {
-            dummySrvVector, dummySrvScalar, dummySrvScalar, dummySrvScalar
-        };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
-        {
-            dummyUavVector, m_pressure[index].GetUav(), dummyUavScalar, dummyUavScalar
-        };
-
-        Dispatch(commandList, PipelineId::ClearScalar, srvs, uavs);
-    }
-
-    // Stage 6: Jacobi iterations of the pressure Poisson equation.
+    // Stage 5: Jacobi iterations of the pressure Poisson equation.
+    //
+    // The pressure field is deliberately not cleared. The solution changes very
+    // little from one frame to the next, so starting from the previous one means
+    // the same iteration count refines an already good guess instead of walking
+    // out from zero every time. The open top pins the constant, which is what
+    // makes warm starting well posed here.
     m_divergence.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     for (int iteration = 0; iteration < settings.pressureIterations; ++iteration)
@@ -422,11 +449,11 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         sourcePressure.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         targetPressure.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            dummySrvVector, sourcePressure.GetSrv(), m_divergence.GetSrv(), dummySrvScalar
+            dummySrvVector, sourcePressure.GetSrv(), m_divergence.GetSrv(), dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             dummyUavVector, targetPressure.GetUav(), dummyUavScalar, dummyUavScalar
         };
@@ -435,7 +462,7 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         m_pressureIndex = 1 - m_pressureIndex;
     }
 
-    // Stage 7: subtract the pressure gradient to make the field divergence free.
+    // Stage 6: subtract the pressure gradient to make the field divergence free.
     {
         GpuTexture3D& sourceVelocity = m_velocity[m_velocityIndex];
         GpuTexture3D& pressure = m_pressure[m_pressureIndex];
@@ -445,11 +472,11 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         pressure.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         targetVelocity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            sourceVelocity.GetSrv(), pressure.GetSrv(), dummySrvScalar, dummySrvScalar
+            sourceVelocity.GetSrv(), pressure.GetSrv(), dummySrvScalar, dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
             targetVelocity.GetUav(), dummyUavScalar, dummyUavScalar, dummyUavScalar
         };
@@ -458,32 +485,75 @@ void FluidSolver::Step(ID3D12GraphicsCommandList* commandList, const FluidSettin
         m_velocityIndex = 1 - m_velocityIndex;
     }
 
-    // Stage 8: transport density and temperature with the corrected velocity field.
+    // Stage 7a: forward semi Lagrangian step of density and temperature.
     {
         GpuTexture3D& velocity = m_velocity[m_velocityIndex];
         GpuTexture3D& sourceDensity = m_density[m_densityIndex];
         GpuTexture3D& sourceTemperature = m_temperature[m_temperatureIndex];
-        GpuTexture3D& targetDensity = m_density[1 - m_densityIndex];
-        GpuTexture3D& targetTemperature = m_temperature[1 - m_temperatureIndex];
 
         velocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         sourceDensity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         sourceTemperature.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        targetDensity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        targetTemperature.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_densityHat.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_temperatureHat.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
         {
-            velocity.GetSrv(), sourceDensity.GetSrv(), sourceTemperature.GetSrv(), dummySrvScalar
+            velocity.GetSrv(), sourceDensity.GetSrv(), sourceTemperature.GetSrv(), dummySrvScalar, dummySrvVector
         };
-        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] =
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
         {
-            dummyUavVector, targetDensity.GetUav(), targetTemperature.GetUav(), dummyUavScalar
+            dummyUavVector, m_densityHat.GetUav(), m_temperatureHat.GetUav(), dummyUavScalar
         };
 
         Dispatch(commandList, PipelineId::AdvectScalars, srvs, uavs);
+    }
 
+    // Stage 7b: MacCormack correction of the density field.
+    {
+        GpuTexture3D& velocity = m_velocity[m_velocityIndex];
+        GpuTexture3D& sourceDensity = m_density[m_densityIndex];
+        GpuTexture3D& targetDensity = m_density[1 - m_densityIndex];
+
+        velocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        sourceDensity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        m_densityHat.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        targetDensity.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
+        {
+            velocity.GetSrv(), sourceDensity.GetSrv(), m_densityHat.GetSrv(), dummySrvScalar, dummySrvVector
+        };
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
+        {
+            dummyUavVector, targetDensity.GetUav(), dummyUavScalar, dummyUavScalar
+        };
+
+        Dispatch(commandList, PipelineId::AdvectDensityCorrect, srvs, uavs);
         m_densityIndex = 1 - m_densityIndex;
+    }
+
+    // Stage 7c: MacCormack correction of the temperature field.
+    {
+        GpuTexture3D& velocity = m_velocity[m_velocityIndex];
+        GpuTexture3D& sourceTemperature = m_temperature[m_temperatureIndex];
+        GpuTexture3D& targetTemperature = m_temperature[1 - m_temperatureIndex];
+
+        velocity.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        sourceTemperature.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        m_temperatureHat.Transition(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        targetTemperature.Transition(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE srvs[SrvSlotCount] =
+        {
+            velocity.GetSrv(), sourceTemperature.GetSrv(), m_temperatureHat.GetSrv(), dummySrvScalar, dummySrvVector
+        };
+        const D3D12_CPU_DESCRIPTOR_HANDLE uavs[UavSlotCount] =
+        {
+            dummyUavVector, targetTemperature.GetUav(), dummyUavScalar, dummyUavScalar
+        };
+
+        Dispatch(commandList, PipelineId::AdvectTemperatureCorrect, srvs, uavs);
         m_temperatureIndex = 1 - m_temperatureIndex;
     }
 }

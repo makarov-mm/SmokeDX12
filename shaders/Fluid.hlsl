@@ -1,8 +1,14 @@
 // Fluid.hlsl
-// Compute passes of a semi Lagrangian Eulerian smoke solver running on a 3D grid.
+// Compute passes of an Eulerian smoke solver running on a 3D grid.
 // Every pass reads through SRVs (so trilinear sampling is available) and writes through UAVs.
-// The root signature binds four SRVs (t0..t3) and four UAVs (u0..u3) for every pass,
+// The root signature binds five SRVs (t0..t4) and four UAVs (u0..u3) for every pass,
 // unused slots are filled with dummy textures on the CPU side.
+//
+// Advection is MacCormack: a forward semi Lagrangian step, a reverse step to
+// measure the error of that step, and a corrected result clamped to the extrema
+// of the trilinear neighbourhood the value was fetched from. Plain semi
+// Lagrangian advection is first order and its numerical diffusion is what turns
+// a plume into a featureless grey blob after a few seconds.
 
 cbuffer FluidConstants : register(b0)
 {
@@ -31,6 +37,11 @@ cbuffer FluidConstants : register(b0)
     float WindDrag;
 
     float3 WindDirection;
+    float MacCormackStrength;
+
+    float TurbulenceStrength;
+    float TurbulenceScale;
+    float BoundaryFade;
     float Padding0;
 };
 
@@ -40,6 +51,7 @@ Texture3D<float4> SourceVelocity : register(t0);
 Texture3D<float> SourceScalarA : register(t1);
 Texture3D<float> SourceScalarB : register(t2);
 Texture3D<float> SourceScalarC : register(t3);
+Texture3D<float4> SourceVelocityHat : register(t4);
 
 RWTexture3D<float4> TargetVelocity : register(u0);
 RWTexture3D<float> TargetScalarA : register(u1);
@@ -61,10 +73,13 @@ bool IsOutside(uint3 cell)
     return cell.x >= GridSize.x || cell.y >= GridSize.y || cell.z >= GridSize.z;
 }
 
-bool IsBoundary(uint3 cell)
+// The floor and the four side walls are solid. The top face is open: it is the
+// only place the plume can leave through, and a sealed lid is what makes smoke
+// spread out into a pancake against the ceiling.
+bool IsSolidBoundary(uint3 cell)
 {
     return cell.x == 0u || cell.y == 0u || cell.z == 0u ||
-           cell.x + 1u == GridSize.x || cell.y + 1u == GridSize.y || cell.z + 1u == GridSize.z;
+           cell.x + 1u == GridSize.x || cell.z + 1u == GridSize.z;
 }
 
 float3 CellToUvw(uint3 cell)
@@ -87,17 +102,63 @@ float LoadScalarA(int3 cell)
     return SourceScalarA[uint3(ClampCell(cell))];
 }
 
-float LoadScalarB(int3 cell)
+// Pressure boundaries. Clamping gives a zero gradient, which is the Neumann
+// condition of a solid wall. Above the top face the ghost value is zero, the
+// Dirichlet condition of an open outlet, and that is what lets the column of
+// gas actually leave the domain instead of piling up under a lid.
+float LoadPressure(int3 cell)
 {
-    return SourceScalarB[uint3(ClampCell(cell))];
+    if (cell.y >= int(GridSize.y))
+    {
+        return 0.0f;
+    }
+
+    return SourceScalarA[uint3(ClampCell(cell))];
 }
 
+// Density and temperature are faded out in a thin shell along the open top and
+// the side walls, so nothing accumulates against a boundary as a flat sheet.
+float BoundaryFalloff(float3 uvw)
+{
+    float fade = 1.0f - smoothstep(1.0f - BoundaryFade, 1.0f, uvw.y);
+    fade *= smoothstep(0.0f, BoundaryFade, uvw.x);
+    fade *= 1.0f - smoothstep(1.0f - BoundaryFade, 1.0f, uvw.x);
+    fade *= smoothstep(0.0f, BoundaryFade, uvw.z);
+    fade *= 1.0f - smoothstep(1.0f - BoundaryFade, 1.0f, uvw.z);
+    return fade;
+}
+
+// Dissipation constants are authored per 60 Hz step, this keeps them meaningful
+// if the fixed step ever changes.
+float DissipationOverStep(float perFrame)
+{
+    return pow(max(perFrame, 1e-4f), Dt * 60.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Noise
+// ---------------------------------------------------------------------------
+
+uint HashUint(uint x)
+{
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+// An integer bit mixer instead of the usual sine hash. The sine version repeats
+// on an axis aligned lattice at grid scale and that pattern is clearly visible
+// once the advection is sharp enough to preserve it.
 float Hash(float3 p)
 {
-    return frac(sin(dot(p, float3(12.9898f, 78.233f, 37.719f))) * 43758.5453f);
+    int3 cell = int3(round(p));
+    uint mixed = uint(cell.x) * 0x8da6b343u + uint(cell.y) * 0xd8163841u + uint(cell.z) * 0xcb1ab31fu;
+    return float(HashUint(mixed)) * (1.0f / 4294967296.0f);
 }
 
-// Value noise, good enough to break the symmetry of the emitter.
 float Noise(float3 p)
 {
     float3 cell = floor(p);
@@ -124,6 +185,42 @@ float Noise(float3 p)
     return lerp(y0, y1, f.z);
 }
 
+float Fbm2(float3 p)
+{
+    return 0.6667f * Noise(p) + 0.3333f * Noise(p * 2.03f + 19.7f);
+}
+
+float3 NoisePotential(float3 p)
+{
+    return float3(
+        Fbm2(p),
+        Fbm2(p + float3(31.416f, 47.853f, 12.793f)),
+        Fbm2(p + float3(73.156f, 11.937f, 91.421f)));
+}
+
+// Curl of a vector potential built from noise. The result is divergence free by
+// construction, which matters a lot here: a plain random velocity field is
+// almost entirely gradient, so the pressure projection deletes it on the same
+// frame and all it leaves behind is a flicker.
+float3 CurlNoise(float3 p)
+{
+    const float e = 0.4f;
+
+    float3 xm = NoisePotential(p - float3(e, 0.0f, 0.0f));
+    float3 xp = NoisePotential(p + float3(e, 0.0f, 0.0f));
+    float3 ym = NoisePotential(p - float3(0.0f, e, 0.0f));
+    float3 yp = NoisePotential(p + float3(0.0f, e, 0.0f));
+    float3 zm = NoisePotential(p - float3(0.0f, 0.0f, e));
+    float3 zp = NoisePotential(p + float3(0.0f, 0.0f, e));
+
+    float3 curl;
+    curl.x = (yp.z - ym.z) - (zp.y - zm.y);
+    curl.y = (zp.x - zm.x) - (xp.z - xm.z);
+    curl.z = (xp.y - xm.y) - (yp.x - ym.x);
+
+    return curl / (2.0f * e);
+}
+
 // Curl of the velocity field, computed with central differences in cell units.
 float3 CurlAt(int3 cell)
 {
@@ -139,6 +236,12 @@ float3 CurlAt(int3 cell)
     curl.y = (vzp.x - vzm.x) - (vxp.z - vxm.z);
     curl.z = (vxp.y - vxm.y) - (vyp.x - vym.x);
     return 0.5f * curl;
+}
+
+// The base cell of the trilinear footprint a sample at uvw reads from.
+int3 FootprintBase(float3 uvw)
+{
+    return int3(floor(uvw * float3(GridSize) - 0.5f));
 }
 
 // ---------------------------------------------------------------------------
@@ -182,34 +285,50 @@ void CSInject(uint3 id : SV_DispatchThreadID)
     }
 
     float3 uvw = CellToUvw(id);
+    float3 aspect = BoxAspect();
 
     // The source wanders slowly, which is enough to stop the plume from growing
     // as a perfectly symmetric mushroom.
-    float3 aspect = BoxAspect();
     float3 center = EmitterPosition;
     center.x += (Noise(float3(Time * 0.37f, 0.0f, 0.0f)) - 0.5f) * EmitterRadius * 0.8f / aspect.x;
     center.z += (Noise(float3(0.0f, 0.0f, Time * 0.31f + 17.0f)) - 0.5f) * EmitterRadius * 0.8f / aspect.z;
 
-    float3 offset = (uvw - center) * BoxAspect();
+    float3 offset = (uvw - center) * aspect;
     float radialDistance = length(offset);
     float falloff = 1.0f - smoothstep(EmitterRadius * 0.25f, EmitterRadius, radialDistance);
 
-    // Break the shell of the source up so the plume gets structure straight away.
-    float shellNoise = Noise(uvw * 24.0f + float3(0.0f, -Time * 2.6f, Time * 0.9f));
-    float shaped = falloff * (0.55f + 0.9f * shellNoise);
+    // Everything below is expensive and only meaningful inside the source, so
+    // the rest of the grid just copies straight through the ping pong.
+    if (falloff <= 0.0f)
+    {
+        TargetVelocity[id] = float4(SourceVelocity[id].xyz, 0.0f);
+        TargetScalarA[id] = SourceScalarA[id];
+        TargetScalarB[id] = SourceScalarB[id];
+        return;
+    }
+
+    // Two octaves rather than one, so the source already carries structure at
+    // more than a single scale and the plume is not a smooth cone near the base.
+    float shell = Fbm2(uvw * aspect * 14.0f + float3(0.0f, -Time * 2.2f, Time * 0.8f));
+    float shaped = falloff * (0.45f + 1.1f * shell);
 
     float density = SourceScalarA[id] + EmitDensity * shaped * Dt;
     float temperature = SourceScalarB[id] + EmitTemperature * shaped * Dt;
 
     float3 velocity = SourceVelocity[id].xyz;
 
-    float3 swirl = cross(float3(0.0f, 1.0f, 0.0f), offset);
-    float3 turbulence = float3(
-        Noise(uvw * 11.0f + float3(Time * 1.4f, 0.0f, 0.0f)) - 0.5f,
-        Noise(uvw * 11.0f + float3(0.0f, Time * 1.1f + 7.0f, 0.0f)) - 0.5f,
-        Noise(uvw * 11.0f + float3(0.0f, 0.0f, Time * 1.2f + 23.0f)) - 0.5f) * 2.0f;
+    // Swirl around the vertical axis, weighted by the distance from the centre
+    // so the core rises straight and only the rim rotates, with a sign that
+    // varies over the source rather than a uniform spin.
+    float3 swirl = cross(float3(0.0f, 1.0f, 0.0f), float3(offset.x, 0.0f, offset.z));
 
-    float3 injected = EmitterVelocity + swirl * 55.0f * (shellNoise - 0.5f) + turbulence * 22.0f;
+    // Divergence free turbulence, instead of the per cell white noise the
+    // previous version injected. White noise is almost entirely gradient, so the
+    // pressure projection deletes it on the same frame it was added and all that
+    // survives is a flicker at the source.
+    float3 turbulence = CurlNoise(uvw * aspect * TurbulenceScale * 3.0f + float3(0.0f, -Time * 1.3f, 0.0f));
+
+    float3 injected = EmitterVelocity + swirl * 40.0f * (shell - 0.35f) + turbulence * TurbulenceStrength * 4.0f;
     velocity += injected * falloff * Dt;
 
     TargetVelocity[id] = float4(velocity, 0.0f);
@@ -231,7 +350,7 @@ void CSForces(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    if (IsBoundary(id))
+    if (IsSolidBoundary(id))
     {
         TargetVelocity[id] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -262,27 +381,41 @@ void CSForces(uint3 id : SV_DispatchThreadID)
     float relaxation = saturate(WindDrag * Dt);
     velocity.xz += (windTarget.xz - velocity.xz) * relaxation;
 
-    // Vorticity confinement puts back the small scale rotation that advection smears out.
-    int3 cell = int3(id);
-    float3 curl = CurlAt(cell);
+    // Everything from here on only shapes gas that is actually there. Stirring
+    // the empty part of the domain costs time and produces nothing visible.
+    float smokeMask = saturate(density * 6.0f);
 
-    float mxp = length(CurlAt(cell + int3(1, 0, 0)));
-    float mxm = length(CurlAt(cell - int3(1, 0, 0)));
-    float myp = length(CurlAt(cell + int3(0, 1, 0)));
-    float mym = length(CurlAt(cell - int3(0, 1, 0)));
-    float mzp = length(CurlAt(cell + int3(0, 0, 1)));
-    float mzm = length(CurlAt(cell - int3(0, 0, 1)));
+    if (smokeMask > 0.001f)
+    {
+        // Vorticity confinement puts back the small scale rotation that advection smears out.
+        int3 cell = int3(id);
+        float3 curl = CurlAt(cell);
 
-    float3 gradient = 0.5f * float3(mxp - mxm, myp - mym, mzp - mzm);
-    float3 normal = gradient / (length(gradient) + 1e-5f);
-    velocity += VorticityStrength * Dt * cross(normal, curl);
+        float mxp = length(CurlAt(cell + int3(1, 0, 0)));
+        float mxm = length(CurlAt(cell - int3(1, 0, 0)));
+        float myp = length(CurlAt(cell + int3(0, 1, 0)));
+        float mym = length(CurlAt(cell - int3(0, 1, 0)));
+        float mzp = length(CurlAt(cell + int3(0, 0, 1)));
+        float mzm = length(CurlAt(cell - int3(0, 0, 1)));
+
+        float3 gradient = 0.5f * float3(mxp - mxm, myp - mym, mzp - mzm);
+        float3 normal = gradient / (length(gradient) + 1e-5f);
+        velocity += VorticityStrength * Dt * smokeMask * cross(normal, curl);
+
+        // A slow divergence free turbulence field on top, which gives the plume
+        // detail at a scale the grid can still resolve but the solver would
+        // never generate on its own at this resolution.
+        float3 turbulence = CurlNoise(uvw * BoxAspect() * TurbulenceScale + float3(0.0f, -Time * 0.6f, Time * 0.15f));
+        float altitude = smoothstep(0.05f, 0.5f, uvw.y);
+        velocity += turbulence * TurbulenceStrength * smokeMask * altitude * Dt;
+    }
 
     TargetVelocity[id] = float4(velocity, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
-// Semi Lagrangian advection of the velocity field
-// t0 velocity, u0 velocity
+// Forward semi Lagrangian step of the velocity field, the first half of MacCormack
+// t0 velocity, u0 intermediate velocity
 // ---------------------------------------------------------------------------
 
 [numthreads(GROUP_SIZE, GROUP_SIZE, GROUP_SIZE)]
@@ -293,7 +426,7 @@ void CSAdvectVelocity(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    if (IsBoundary(id))
+    if (IsSolidBoundary(id))
     {
         TargetVelocity[id] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -303,8 +436,64 @@ void CSAdvectVelocity(uint3 id : SV_DispatchThreadID)
     float3 velocity = SourceVelocity[id].xyz;
     float3 previous = uvw - velocity * Dt / float3(GridSize);
 
-    float3 advected = SourceVelocity.SampleLevel(LinearClamp, previous, 0.0f).xyz;
-    TargetVelocity[id] = float4(advected * VelocityDissipation, 0.0f);
+    TargetVelocity[id] = float4(SourceVelocity.SampleLevel(LinearClamp, previous, 0.0f).xyz, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// MacCormack correction of the velocity field
+// t0 velocity at step n, t4 forward advected velocity
+// u0 velocity at step n+1
+// ---------------------------------------------------------------------------
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, GROUP_SIZE)]
+void CSAdvectVelocityCorrect(uint3 id : SV_DispatchThreadID)
+{
+    if (IsOutside(id))
+    {
+        return;
+    }
+
+    if (IsSolidBoundary(id))
+    {
+        TargetVelocity[id] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float3 uvw = CellToUvw(id);
+    float3 velocity = SourceVelocity[id].xyz;
+    float3 offset = velocity * Dt / float3(GridSize);
+
+    float3 forwardValue = SourceVelocityHat[id].xyz;
+    float3 reverseValue = SourceVelocityHat.SampleLevel(LinearClamp, uvw + offset, 0.0f).xyz;
+
+    // Half of the round trip error is the second order correction term.
+    float3 corrected = forwardValue + 0.5f * MacCormackStrength * (velocity - reverseValue);
+
+    // The correction is only trustworthy inside the range of the values the
+    // forward step interpolated between. Outside it the scheme overshoots and
+    // rings, so those cells fall back to the plain first order result.
+    int3 baseCell = FootprintBase(uvw - offset);
+    float3 minimum = float3(1e30f, 1e30f, 1e30f);
+    float3 maximum = float3(-1e30f, -1e30f, -1e30f);
+
+    [unroll]
+    for (int k = 0; k < 2; ++k)
+    {
+        [unroll]
+        for (int j = 0; j < 2; ++j)
+        {
+            [unroll]
+            for (int i = 0; i < 2; ++i)
+            {
+                float3 sampled = LoadVelocity(baseCell + int3(i, j, k));
+                minimum = min(minimum, sampled);
+                maximum = max(maximum, sampled);
+            }
+        }
+    }
+
+    corrected = clamp(corrected, minimum, maximum);
+    TargetVelocity[id] = float4(corrected * DissipationOverStep(VelocityDissipation), 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,9 +536,9 @@ void CSJacobi(uint3 id : SV_DispatchThreadID)
 
     int3 cell = int3(id);
     float sum =
-        LoadScalarA(cell + int3(1, 0, 0)) + LoadScalarA(cell - int3(1, 0, 0)) +
-        LoadScalarA(cell + int3(0, 1, 0)) + LoadScalarA(cell - int3(0, 1, 0)) +
-        LoadScalarA(cell + int3(0, 0, 1)) + LoadScalarA(cell - int3(0, 0, 1));
+        LoadPressure(cell + int3(1, 0, 0)) + LoadPressure(cell - int3(1, 0, 0)) +
+        LoadPressure(cell + int3(0, 1, 0)) + LoadPressure(cell - int3(0, 1, 0)) +
+        LoadPressure(cell + int3(0, 0, 1)) + LoadPressure(cell - int3(0, 0, 1));
 
     float divergence = SourceScalarB[id];
     TargetScalarA[id] = (sum - divergence) / 6.0f;
@@ -368,7 +557,7 @@ void CSProject(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    if (IsBoundary(id))
+    if (IsSolidBoundary(id))
     {
         TargetVelocity[id] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
@@ -376,18 +565,18 @@ void CSProject(uint3 id : SV_DispatchThreadID)
 
     int3 cell = int3(id);
     float3 gradient = 0.5f * float3(
-        LoadScalarA(cell + int3(1, 0, 0)) - LoadScalarA(cell - int3(1, 0, 0)),
-        LoadScalarA(cell + int3(0, 1, 0)) - LoadScalarA(cell - int3(0, 1, 0)),
-        LoadScalarA(cell + int3(0, 0, 1)) - LoadScalarA(cell - int3(0, 0, 1)));
+        LoadPressure(cell + int3(1, 0, 0)) - LoadPressure(cell - int3(1, 0, 0)),
+        LoadPressure(cell + int3(0, 1, 0)) - LoadPressure(cell - int3(0, 1, 0)),
+        LoadPressure(cell + int3(0, 0, 1)) - LoadPressure(cell - int3(0, 0, 1)));
 
     float3 velocity = SourceVelocity[id].xyz - gradient;
     TargetVelocity[id] = float4(velocity, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
-// Advection of density and temperature with the projected velocity field
+// Forward semi Lagrangian step of density and temperature
 // t0 velocity, t1 density, t2 temperature
-// u1 density, u2 temperature
+// u1 intermediate density, u2 intermediate temperature
 // ---------------------------------------------------------------------------
 
 [numthreads(GROUP_SIZE, GROUP_SIZE, GROUP_SIZE)]
@@ -402,10 +591,106 @@ void CSAdvectScalars(uint3 id : SV_DispatchThreadID)
     float3 velocity = SourceVelocity[id].xyz;
     float3 previous = uvw - velocity * Dt / float3(GridSize);
 
-    float density = SourceScalarA.SampleLevel(LinearClamp, previous, 0.0f) * DensityDissipation;
-    float temperature = SourceScalarB.SampleLevel(LinearClamp, previous, 0.0f);
-    temperature = lerp(AmbientTemperature, temperature, TemperatureDissipation);
+    TargetScalarA[id] = SourceScalarA.SampleLevel(LinearClamp, previous, 0.0f);
+    TargetScalarB[id] = SourceScalarB.SampleLevel(LinearClamp, previous, 0.0f);
+}
 
-    TargetScalarA[id] = max(density, 0.0f);
-    TargetScalarB[id] = temperature;
+// ---------------------------------------------------------------------------
+// MacCormack correction of the density field, plus dissipation
+// t0 velocity, t1 density at step n, t2 forward advected density
+// u1 density at step n+1
+// ---------------------------------------------------------------------------
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, GROUP_SIZE)]
+void CSAdvectDensityCorrect(uint3 id : SV_DispatchThreadID)
+{
+    if (IsOutside(id))
+    {
+        return;
+    }
+
+    float3 uvw = CellToUvw(id);
+    float3 velocity = SourceVelocity[id].xyz;
+    float3 offset = velocity * Dt / float3(GridSize);
+
+    float current = SourceScalarA[id];
+    float forwardValue = SourceScalarB[id];
+    float reverseValue = SourceScalarB.SampleLevel(LinearClamp, uvw + offset, 0.0f);
+
+    float corrected = forwardValue + 0.5f * MacCormackStrength * (current - reverseValue);
+
+    int3 baseCell = FootprintBase(uvw - offset);
+    float minimum = 1e30f;
+    float maximum = -1e30f;
+
+    [unroll]
+    for (int k = 0; k < 2; ++k)
+    {
+        [unroll]
+        for (int j = 0; j < 2; ++j)
+        {
+            [unroll]
+            for (int i = 0; i < 2; ++i)
+            {
+                float sampled = LoadScalarA(baseCell + int3(i, j, k));
+                minimum = min(minimum, sampled);
+                maximum = max(maximum, sampled);
+            }
+        }
+    }
+
+    corrected = clamp(corrected, minimum, maximum);
+
+    float density = max(corrected, 0.0f) * DissipationOverStep(DensityDissipation);
+    TargetScalarA[id] = density * BoundaryFalloff(uvw);
+}
+
+// ---------------------------------------------------------------------------
+// MacCormack correction of the temperature field, plus cooling
+// t0 velocity, t1 temperature at step n, t2 forward advected temperature
+// u1 temperature at step n+1
+// ---------------------------------------------------------------------------
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, GROUP_SIZE)]
+void CSAdvectTemperatureCorrect(uint3 id : SV_DispatchThreadID)
+{
+    if (IsOutside(id))
+    {
+        return;
+    }
+
+    float3 uvw = CellToUvw(id);
+    float3 velocity = SourceVelocity[id].xyz;
+    float3 offset = velocity * Dt / float3(GridSize);
+
+    float current = SourceScalarA[id];
+    float forwardValue = SourceScalarB[id];
+    float reverseValue = SourceScalarB.SampleLevel(LinearClamp, uvw + offset, 0.0f);
+
+    float corrected = forwardValue + 0.5f * MacCormackStrength * (current - reverseValue);
+
+    int3 baseCell = FootprintBase(uvw - offset);
+    float minimum = 1e30f;
+    float maximum = -1e30f;
+
+    [unroll]
+    for (int k = 0; k < 2; ++k)
+    {
+        [unroll]
+        for (int j = 0; j < 2; ++j)
+        {
+            [unroll]
+            for (int i = 0; i < 2; ++i)
+            {
+                float sampled = LoadScalarA(baseCell + int3(i, j, k));
+                minimum = min(minimum, sampled);
+                maximum = max(maximum, sampled);
+            }
+        }
+    }
+
+    corrected = clamp(corrected, minimum, maximum);
+
+    float temperature = lerp(AmbientTemperature, corrected, DissipationOverStep(TemperatureDissipation));
+    TargetScalarA[id] = lerp(AmbientTemperature, temperature, BoundaryFalloff(uvw));
 }

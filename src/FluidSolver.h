@@ -23,10 +23,26 @@ struct FluidSettings
     float buoyancy = 20.0f;
     float gravity = 1.0f;
     float ambientTemperature = 0.0f;
-    float vorticityStrength = 24.0f;
+
+    // MacCormack advection keeps far more of the small scale structure alive by
+    // itself, so the confinement that used to compensate for the diffusion of
+    // the first order scheme can come down. Too much of it on top of a sharp
+    // advection scheme makes the plume boil.
+    float vorticityStrength = 15.0f;
+    float macCormackStrength = 1.0f;
+
     float densityDissipation = 0.9990f;
     float temperatureDissipation = 0.9930f;
     float velocityDissipation = 0.9995f;
+
+    // Divergence free turbulence added to the gas itself, in cells per second.
+    // The scale is in cycles across the shortest axis of the box.
+    float turbulenceStrength = 5.0f;
+    float turbulenceScale = 3.0f;
+
+    // Width of the shell along the open top and the side walls in which density
+    // is faded out, as a fraction of the domain.
+    float boundaryFade = 0.07f;
 
     float windDirection[3] = { 1.0f, 0.0f, 0.15f };
     float windStrength = 10.0f;
@@ -36,7 +52,7 @@ struct FluidSettings
     int pressureIterations = 40;
 };
 
-// Constant buffer layout shared with Fluid.hlsl. Exactly 28 root constants.
+// Constant buffer layout shared with Fluid.hlsl. Exactly 32 root constants.
 struct FluidConstants
 {
     uint32_t gridSize[3];
@@ -64,6 +80,11 @@ struct FluidConstants
     float windDrag;
 
     float windDirection[3];
+    float macCormackStrength;
+
+    float turbulenceStrength;
+    float turbulenceScale;
+    float boundaryFade;
     float padding;
 };
 
@@ -103,10 +124,13 @@ public:
         Inject,
         Forces,
         AdvectVelocity,
+        AdvectVelocityCorrect,
         Divergence,
         Jacobi,
         Project,
         AdvectScalars,
+        AdvectDensityCorrect,
+        AdvectTemperatureCorrect,
         Count
     };
 
@@ -123,6 +147,9 @@ private:
         const D3D12_CPU_DESCRIPTOR_HANDLE* srvs,
         const D3D12_CPU_DESCRIPTOR_HANDLE* uavs);
 
+    static constexpr uint32_t SrvSlotCount = 5;
+    static constexpr uint32_t UavSlotCount = 4;
+
     ID3D12Device* m_device = nullptr;
     DescriptorAllocator* m_allocator = nullptr;
     ShaderLibrary* m_shaders = nullptr;
@@ -135,6 +162,11 @@ private:
     GpuTexture3D m_temperature[2];
     GpuTexture3D m_pressure[2];
     GpuTexture3D m_divergence;
+
+    // Intermediate results of the forward half of the MacCormack step.
+    GpuTexture3D m_velocityHat;
+    GpuTexture3D m_densityHat;
+    GpuTexture3D m_temperatureHat;
 
     // Placeholders bound to descriptor slots a given pass does not use.
     GpuTexture3D m_dummyVectorSrv;

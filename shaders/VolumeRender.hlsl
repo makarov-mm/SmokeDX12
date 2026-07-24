@@ -6,10 +6,14 @@
 // equation front to back through the simulation box and composites the result
 // over that background.
 //
-// Scattering uses a Henyey Greenstein phase function plus a cheap multiple
-// scattering approximation: the same optical depth is reused across a few
-// octaves with progressively weaker extinction, which is what stops dense smoke
-// from turning into a black silhouette.
+// Three things do most of the work for the look:
+//   * sub grid detail, noise that erodes the field where it is already thin, so
+//     the plume has structure finer than a cell instead of the blobby silhouette
+//     the grid resolution would otherwise impose;
+//   * an exponentially expanding march towards the light, which spends its
+//     samples near the shading point where the shadow gradient actually is;
+//   * ambient light occluded by a short march towards the sky, so the inside of
+//     the column is darker than its rim.
 
 cbuffer RenderConstants : register(b0)
 {
@@ -50,6 +54,11 @@ cbuffer RenderConstants : register(b0)
 
     float3 AmbientColor;
     float GridScale;
+
+    float DetailStrength;
+    float DetailScale;
+    float DetailDrift;
+    float PowderStrength;
 };
 
 SamplerState LinearClamp : register(s0);
@@ -82,6 +91,56 @@ float InterleavedGradientNoise(float2 pixel)
     return frac(52.9829189f * frac(dot(pixel, float2(0.06711056f, 0.00583715f))));
 }
 
+uint HashUint(uint x)
+{
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+float Hash(float3 p)
+{
+    int3 cell = int3(round(p));
+    uint mixed = uint(cell.x) * 0x8da6b343u + uint(cell.y) * 0xd8163841u + uint(cell.z) * 0xcb1ab31fu;
+    return float(HashUint(mixed)) * (1.0f / 4294967296.0f);
+}
+
+float ValueNoise(float3 p)
+{
+    float3 cell = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0f - 2.0f * f);
+
+    float n000 = Hash(cell + float3(0.0f, 0.0f, 0.0f));
+    float n100 = Hash(cell + float3(1.0f, 0.0f, 0.0f));
+    float n010 = Hash(cell + float3(0.0f, 1.0f, 0.0f));
+    float n110 = Hash(cell + float3(1.0f, 1.0f, 0.0f));
+    float n001 = Hash(cell + float3(0.0f, 0.0f, 1.0f));
+    float n101 = Hash(cell + float3(1.0f, 0.0f, 1.0f));
+    float n011 = Hash(cell + float3(0.0f, 1.0f, 1.0f));
+    float n111 = Hash(cell + float3(1.0f, 1.0f, 1.0f));
+
+    float x00 = lerp(n000, n100, f.x);
+    float x10 = lerp(n010, n110, f.x);
+    float x01 = lerp(n001, n101, f.x);
+    float x11 = lerp(n011, n111, f.x);
+
+    float y0 = lerp(x00, x10, f.y);
+    float y1 = lerp(x01, x11, f.y);
+
+    return lerp(y0, y1, f.z);
+}
+
+float Fbm3(float3 p)
+{
+    return 0.5714f * ValueNoise(p) +
+           0.2857f * ValueNoise(p * 2.03f + 11.3f) +
+           0.1429f * ValueNoise(p * 4.11f + 27.9f);
+}
+
 bool IntersectBox(float3 origin, float3 direction, float3 halfSize, out float tEnter, out float tExit)
 {
     float3 inverseDirection = 1.0f / direction;
@@ -98,7 +157,7 @@ bool IntersectBox(float3 origin, float3 direction, float3 halfSize, out float tE
     return tExit > tEnter;
 }
 
-float SampleDensity(float3 position)
+float SampleDensityRaw(float3 position)
 {
     float3 uvw = position / BoxSize + 0.5f;
 
@@ -107,36 +166,70 @@ float SampleDensity(float3 position)
         return 0.0f;
     }
 
-    return DensityTexture.SampleLevel(LinearClamp, uvw, 0.0f) * DensityScale;
+    return DensityTexture.SampleLevel(LinearClamp, uvw, 0.0f);
+}
+
+// The detail field drifts upwards and slowly sideways, so it travels roughly
+// with the plume instead of sitting still in world space while the smoke slides
+// through it, which is what makes a static noise texture read as a fixed
+// pattern painted over moving gas.
+float3 DetailPosition(float3 position)
+{
+    float3 p = position * DetailScale;
+    p.y -= Time * DetailDrift;
+    p.x -= Time * DetailDrift * 0.35f;
+    return p;
+}
+
+// Erode the field where it is already thin. The dense core is left alone,
+// otherwise the whole column breaks into disconnected speckles.
+float ApplyDetail(float raw, float noise)
+{
+    float edge = 1.0f - saturate(raw * 3.0f);
+    return max(raw - DetailStrength * edge * noise, 0.0f);
+}
+
+// The secondary rays deliberately skip the detail noise and read the raw field.
+// Almost every sample in the frame is a shadow sample, so this is where the
+// noise would cost the most, and it is also where it matters least: the shadow
+// term is an exponential of an integral and the multiple scattering octaves
+// blur it further, so eroded wisps are invisible in it. Erosion only removes
+// thin material anyway, which contributes very little optical depth.
+float SampleDensityShadow(float3 position)
+{
+    return SampleDensityRaw(position) * DensityScale;
 }
 
 float SampleTemperature(float3 position)
 {
     float3 uvw = position / BoxSize + 0.5f;
-    return TemperatureTexture.SampleLevel(LinearClamp, uvw, 0.0f);
-}
 
-// Integrated density between a point and the outside of the box along a direction.
-float OpticalDepthTowards(float3 origin, float3 direction, int steps)
-{
-    float tEnter;
-    float tExit;
-    if (!IntersectBox(origin, direction, BoxSize * 0.5f, tEnter, tExit))
+    if (any(uvw < 0.0f) || any(uvw > 1.0f))
     {
         return 0.0f;
     }
 
-    float span = tExit - tEnter;
-    float stepSize = span / steps;
-    float t = tEnter + stepSize * 0.5f;
+    return TemperatureTexture.SampleLevel(LinearClamp, uvw, 0.0f);
+}
 
+// Optical depth along a direction, marched with exponentially growing steps.
+// A uniform march across the whole box spends most of its samples far away
+// where the medium is smooth, and resolves the contact region, which is the
+// part the eye reads as shape, with two or three samples. Growing the step
+// inverts that budget for the same cost.
+float OpticalDepthTowards(float3 origin, float3 direction, int steps)
+{
+    float longest = max(max(BoxSize.x, BoxSize.y), BoxSize.z);
+    float stepSize = longest / 48.0f;
+    float t = 0.0f;
     float sum = 0.0f;
 
     [loop]
     for (int i = 0; i < steps; ++i)
     {
-        sum += SampleDensity(origin + direction * t) * stepSize;
+        sum += SampleDensityShadow(origin + direction * (t + stepSize * 0.5f)) * stepSize;
         t += stepSize;
+        stepSize *= 1.6f;
     }
 
     return sum;
@@ -147,6 +240,14 @@ float HenyeyGreenstein(float cosTheta, float g)
     float g2 = g * g;
     float denominator = 1.0f + g2 - 2.0f * g * cosTheta;
     return (1.0f - g2) / (4.0f * Pi * pow(max(denominator, 1e-4f), 1.5f));
+}
+
+// Smoke scatters strongly forward but also has a weak backward lobe. A single
+// lobe makes the plume look flat from every angle except directly against the
+// light.
+float DualLobePhase(float cosTheta, float g)
+{
+    return lerp(HenyeyGreenstein(cosTheta, -g * 0.35f), HenyeyGreenstein(cosTheta, g), 0.7f);
 }
 
 // Rough blackbody style ramp. The input is already normalised by the reference
@@ -218,9 +319,17 @@ float3 ShadeFloor(float3 position, float3 lightDirection)
 
 float3 ToneMap(float3 color)
 {
-    // Filmic curve by Jim Hejl and Richard Burgess Dawson, gamma is baked in.
-    float3 x = max(float3(0.0f, 0.0f, 0.0f), color - 0.004f);
-    return (x * (6.2f * x + 0.5f)) / (x * (6.2f * x + 1.7f) + 0.06f);
+    // Narkowicz fit of the ACES filmic curve. It holds the saturation of the hot
+    // core together instead of shifting it towards white the way the older
+    // Hejl curve does.
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+
+    float3 mapped = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+    return pow(mapped, 1.0f / 2.2f);
 }
 
 float4 PSMain(VertexOutput input) : SV_Target
@@ -253,25 +362,26 @@ float4 PSMain(VertexOutput input) : SV_Target
         background = ShadeSky(direction, lightDirection);
     }
 
+    float dither = InterleavedGradientNoise(input.position.xy + frac(Time) * 137.0f);
+
     float tEnter;
     float tExit;
     if (!IntersectBox(CameraPosition, direction, BoxSize * 0.5f, tEnter, tExit))
     {
-        return float4(ToneMap(background * Exposure), 1.0f);
+        return float4(ToneMap(background * Exposure) + (dither - 0.5f) / 255.0f, 1.0f);
     }
 
     tExit = min(tExit, backgroundDistance);
     if (tExit <= tEnter)
     {
-        return float4(ToneMap(background * Exposure), 1.0f);
+        return float4(ToneMap(background * Exposure) + (dither - 0.5f) / 255.0f, 1.0f);
     }
 
     int steps = max(1, (int)StepCount);
     int shadowSteps = max(1, (int)ShadowSteps);
 
     float stepSize = (tExit - tEnter) / steps;
-    float jitter = InterleavedGradientNoise(input.position.xy + frac(Time) * 137.0f) * stepSize;
-    float t = tEnter + jitter;
+    float t = tEnter + dither * stepSize;
 
     float cosTheta = dot(direction, lightDirection);
 
@@ -279,12 +389,22 @@ float4 PSMain(VertexOutput input) : SV_Target
     float transmittance = 1.0f;
 
     [loop]
-    for (int i = 0; i < steps; ++i)
+    for (int i = 0; i < steps && t < tExit; ++i)
     {
         float3 position = CameraPosition + direction * t;
-        float density = SampleDensity(position);
 
-        if (density > 0.0015f)
+        // Most of a ray through this box is empty. Testing the raw field first
+        // is one texture fetch, and it lets empty space be crossed in strides
+        // instead of one uniform step at a time.
+        float raw = SampleDensityRaw(position);
+        if (raw < 0.0015f)
+        {
+            t += stepSize * 2.5f;
+            continue;
+        }
+
+        float density = ApplyDetail(raw, Fbm3(DetailPosition(position))) * DensityScale;
+        if (density > 0.0f)
         {
             float extinction = density * Absorption;
             float opticalDepth = OpticalDepthTowards(position, lightDirection, shadowSteps) * Absorption;
@@ -300,7 +420,7 @@ float4 PSMain(VertexOutput input) : SV_Target
             for (int octave = 0; octave < 3; ++octave)
             {
                 float shadow = exp(-opticalDepth * attenuation);
-                float phase = HenyeyGreenstein(cosTheta, anisotropy);
+                float phase = DualLobePhase(cosTheta, anisotropy);
                 scattering += contribution * shadow * phase;
 
                 attenuation *= 0.45f;
@@ -308,16 +428,26 @@ float4 PSMain(VertexOutput input) : SV_Target
                 anisotropy *= 0.5f;
             }
 
-            float3 inScattered = LightColor * LightIntensity * scattering + AmbientColor;
+            // Single scattering overestimates the brightness of thin gas facing
+            // the light. The powder term darkens it back down and is what makes
+            // the lit side of a plume read as volume rather than as fog.
+            float powder = 1.0f - exp(-density * 3.0f);
+            float3 direct = LightColor * LightIntensity * scattering * lerp(1.0f, powder, PowderStrength);
+
+            // Ambient light comes from the sky, so it should be occluded by
+            // whatever is stacked above this point. A flat ambient term added
+            // everywhere is exactly what flattens a volume out.
+            float skyDepth = OpticalDepthTowards(position, float3(0.0f, 1.0f, 0.0f), 4) * Absorption;
+            float3 ambient = AmbientColor * (0.25f + 0.75f * exp(-skyDepth * 0.6f));
 
             float temperature = SampleTemperature(position);
             float3 emitted = EmissionColor(temperature / max(TemperatureReference, 1e-3f)) * EmissionScale;
 
             float alpha = 1.0f - exp(-extinction * stepSize);
-            accumulated += transmittance * alpha * (inScattered + emitted);
+            accumulated += transmittance * alpha * (direct + ambient + emitted);
             transmittance *= 1.0f - alpha;
 
-            if (transmittance < 0.005f)
+            if (transmittance < 0.004f)
             {
                 break;
             }
@@ -327,5 +457,7 @@ float4 PSMain(VertexOutput input) : SV_Target
     }
 
     float3 color = accumulated + transmittance * background;
-    return float4(ToneMap(color * Exposure), 1.0f);
+
+    // A little dither on the way out, the sky gradient bands badly without it.
+    return float4(ToneMap(color * Exposure) + (dither - 0.5f) / 255.0f, 1.0f);
 }

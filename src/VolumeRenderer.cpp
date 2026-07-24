@@ -233,6 +233,11 @@ void VolumeRenderer::Render(
     constants.ambientColor[2] = settings.ambientColor[2];
     constants.gridScale = settings.gridScale;
 
+    constants.detailStrength = settings.detailStrength;
+    constants.detailScale = settings.detailScale;
+    constants.detailDrift = settings.detailDrift;
+    constants.powderStrength = settings.powderStrength;
+
     commandList->SetGraphicsRoot32BitConstants(0, sizeof(RenderConstants) / sizeof(uint32_t), &constants, 0);
 
     const D3D12_CPU_DESCRIPTOR_HANDLE srvs[2] = { density.GetSrv(), temperature.GetSrv() };
