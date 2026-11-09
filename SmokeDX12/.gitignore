@@ -1,0 +1,17 @@
+build/
+.vs/
+*.user
+*.suo
+*.sdf
+*.opendb
+*.db
+*.aps
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.log
+*.tlog
+*.idb
+*.iobj
+*.ipdb

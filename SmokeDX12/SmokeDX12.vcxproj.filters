@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source">
+      <UniqueIdentifier>{2c1f9d10-6a3b-4f88-a1c9-11a0d4b7e001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Headers">
+      <UniqueIdentifier>{2c1f9d10-6a3b-4f88-a1c9-11a0d4b7e002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{2c1f9d10-6a3b-4f88-a1c9-11a0d4b7e003}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Application.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\Common.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\DescriptorAllocator.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\FluidSolver.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\GpuTexture3D.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\GraphicsDevice.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\Main.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\OrbitCamera.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\ShaderLibrary.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\VolumeRenderer.cpp"><Filter>Source</Filter></ClCompile>
+    <ClCompile Include="src\Window.cpp"><Filter>Source</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\Application.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\Common.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\DescriptorAllocator.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\FluidSolver.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\GpuTexture3D.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\GraphicsDevice.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\Math.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\OrbitCamera.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\ShaderLibrary.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\SimulationClock.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\VolumeRenderer.h"><Filter>Headers</Filter></ClInclude>
+    <ClInclude Include="src\Window.h"><Filter>Headers</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\Fluid.hlsl"><Filter>Shaders</Filter></None>
+    <None Include="shaders\Noise.hlsli"><Filter>Shaders</Filter></None>
+    <None Include="shaders\VolumeRender.hlsl"><Filter>Shaders</Filter></None>
+    <None Include="README.md" />
+  </ItemGroup>
+</Project>
